@@ -230,26 +230,61 @@ def validate_spt_root(path):
     return _find_server_exe(path) is not None
 
 
-def scan_installed_mods(spt_root):
-    """Scan an SPT install for locally installed mods. Each record has
-    source/path/guid/name/version (and author/spt_version, when the reader
-    found them); entries where extraction failed are skipped rather than
-    included with missing data."""
+def _same_folder(a, b):
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return str(a).casefold() == str(b).casefold()
+
+
+def is_headless_install(root):
+    """A Fika headless client: its own game install, usually beside the
+    server, with its own BepInEx plugins that go stale independently."""
+    root = Path(root)
+    return ((root / "HeadlessConfig.json").is_file()
+            or any((root / BEPINEX_PLUGINS_SUBPATH).rglob("Fika.Headless.dll")))
+
+
+def scan_installed_mods(spt_root, server_root=None):
+    """Scan for installed mods. Each record has source/path/guid/name/version
+    (and author/spt_version, when the reader found them); entries where
+    extraction failed are skipped rather than included with missing data.
+
+    spt_root is the game folder (client plugins). server_root, when it's a
+    different folder, is where the server mods are read from instead -- the
+    game folder's own server copy is then ignored as stale -- and any BepInEx
+    plugins there are a headless client's, reported with source "headless".
+    """
     results = []
+    separate = bool(server_root) and not _same_folder(spt_root, server_root)
+    server_root = server_root if separate else spt_root
 
     client_dlls = find_bepinex_plugins(spt_root)
-    server_dlls = find_server_mods(spt_root)
-    reader_output = _run_modreader(spt_root, client_dlls, server_dlls)
-    client_meta = reader_output.get("client", {})
-    server_meta = reader_output.get("server", {})
+    server_dlls = find_server_mods(server_root)
+    headless_dlls = find_bepinex_plugins(server_root) if separate else []
+    if separate:
+        # One ModReader run per install: each resolves its dependencies from
+        # its own root (the game's Managed DLLs vs. the server's).
+        game_out = _run_modreader(spt_root, client_dlls, [])
+        server_out = _run_modreader(server_root, headless_dlls, server_dlls)
+        client_meta = game_out.get("client", {})
+        headless_meta = server_out.get("client", {})
+        server_meta = server_out.get("server", {})
+    else:
+        reader_output = _run_modreader(spt_root, client_dlls, server_dlls)
+        client_meta = reader_output.get("client", {})
+        headless_meta = {}
+        server_meta = reader_output.get("server", {})
 
-    for dll_path in client_dlls:
-        meta = client_meta.get(str(dll_path))
-        if meta and not meta.get("error") and meta.get("guid"):
-            results.append({
-                "source": "client", "path": str(dll_path), "guid": meta.get("guid"),
-                "name": meta.get("name"), "version": meta.get("version"),
-            })
+    for source, dlls, meta_by_path in (("client", client_dlls, client_meta),
+                                       ("headless", headless_dlls, headless_meta)):
+        for dll_path in dlls:
+            meta = meta_by_path.get(str(dll_path))
+            if meta and not meta.get("error") and meta.get("guid"):
+                results.append({
+                    "source": source, "path": str(dll_path), "guid": meta.get("guid"),
+                    "name": meta.get("name"), "version": meta.get("version"),
+                })
 
     for dll_path in server_dlls:
         meta = server_meta.get(str(dll_path))
@@ -263,7 +298,7 @@ def scan_installed_mods(spt_root):
                 "spt_version": meta.get("sptVersion"),
             })
 
-    for manifest_path in find_legacy_server_mods(spt_root):
+    for manifest_path in find_legacy_server_mods(server_root):
         record = _parse_legacy_manifest(manifest_path)
         if record:
             results.append(record)

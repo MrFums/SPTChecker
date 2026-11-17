@@ -7,8 +7,11 @@ Fork of [JoelHauser/SPTChecker](https://github.com/JoelHauser/SPTChecker), cut d
 ### Use
 
 1. Run `SPTModUpdateChecker.exe`. No Python or .NET install needed.
-2. Click **Change** at the bottom and pick your SPT folder: the one holding `BepInEx` and `SPT_Runtime` (or `SPT` on 4.0).
-3. The check runs on launch, or click **Check now**.
+2. Click **Change** next to **GAME** and pick your SPT game folder: the one holding `BepInEx` (and `SPT_Runtime`, or `SPT` on 4.0, if the server is there too).
+3. If your server runs from a different folder, set **SERVER** to it. Server mods and the SPT version are then read from there. If that folder also holds a Fika headless client, its plugins are checked too (shown as **headless**). Network drives work.
+4. The check runs on launch, or click **Check now**.
+
+A mod installed in several places shows as one row tagged with where it lives (`client · server · headless`). The copies that are behind are highlighted, so a stale headless is easy to spot.
 
 The headline shows how many mods need updating. The **Updates** tab lists each with installed → latest version; click a row to open its Forge page, or use **Open all**. **Up to date** and **Not on Forge** have their own tabs.
 

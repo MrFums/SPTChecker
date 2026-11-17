@@ -175,10 +175,17 @@ static class ModReader
         var alc = new AssemblyLoadContext("modreader-" + Guid.NewGuid(), isCollectible: true);
         try
         {
+            // Dependencies are loaded from a stream, like the target itself,
+            // not LoadFromAssemblyPath: that memory-maps the file, which fails
+            // with a bare FileLoadException on some SMB shares -- a server and
+            // headless kept on a network drive read as zero mods otherwise.
             alc.Resolving += (context, name) =>
-                name.Name != null && dllIndex.TryGetValue(name.Name, out var path)
-                    ? context.LoadFromAssemblyPath(path)
-                    : null;
+            {
+                if (name.Name == null || !dllIndex.TryGetValue(name.Name, out var path))
+                    return null;
+                using var dep = File.OpenRead(path);
+                return context.LoadFromStream(dep);
+            };
 
             using var stream = File.OpenRead(dllPath);
             var assembly = alc.LoadFromStream(stream);

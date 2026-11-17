@@ -120,6 +120,24 @@ def test_unsettled_miss_is_not_cached(monkeypatch, tmp_path):
     assert matcher._load_cache() == {}
 
 
+def test_same_mod_in_several_installs_searched_once_and_merged(monkeypatch, tmp_path):
+    monkeypatch.setattr(matcher, "MATCH_CACHE_FILE", tmp_path / "c.json")
+    listing = _mod("forge.x", title="X Mod", version="2.0.0")
+    searches = []
+    monkeypatch.setattr(matcher, "lookup_by_guids",
+                        lambda g: ({}, {x.casefold() for x in g if x}, set()))
+    monkeypatch.setattr(matcher, "lookup_by_name",
+                        lambda n: searches.append(n) or [listing])
+    mods = [{"guid": "local.x", "name": "X Mod", "version": "2.0.0", "source": "client"},
+            {"guid": "local.x", "name": "X Mod", "version": "1.0.0", "source": "headless"}]
+    [r] = matcher.match_local_mods(mods)
+    assert len(searches) == 1
+    assert r["sources"] == ["client", "headless"]
+    assert r["outdated_sources"] == ["headless"] and r["update_available"]
+    assert r["current_version"] == "client 2.0.0, headless 1.0.0"
+    assert r["available_version"] == "2.0.0"
+
+
 def test_match_one_falls_back_when_unsettled(monkeypatch):
     seen = []
     monkeypatch.setattr(matcher, "lookup_by_guid", lambda g: seen.append(g) or _mod(g))

@@ -272,17 +272,31 @@ def _merge_group(group):
     versions = [r["current_version"] for r in group if r["current_version"]]
     first = versions[0] if versions else None
     if versions and any(not _versions_equal(v, first) for v in versions):
-        current_version = ", ".join(
+        # One label per (place, version): a mod with two client DLLs at the
+        # same version shouldn't read "client 1.0, client 1.0, headless 0.9".
+        labels = dict.fromkeys(
             f"{r['local'].get('source', '?')} {r['current_version']}"
-            for r in group if r["current_version"]
-        )
+            for r in group if r["current_version"])
+        current_version = ", ".join(labels)
     else:
         current_version = first
+    updating = [r for r in group if r["update_available"]]
     return {
         **group[0],
         "current_version": current_version,
-        "update_available": any(r["update_available"] for r in group),
+        "available_version": (updating[0] if updating else group[0])["available_version"],
+        "update_available": bool(updating),
+        **_where(group),
     }
+
+
+def _where(group):
+    """Which installs hold the mod, and which of those are behind -- with a
+    separate headless, its copy is the one most often left on an old version."""
+    sources = list(dict.fromkeys(r["local"].get("source") or "?" for r in group))
+    outdated = list(dict.fromkeys(
+        r["local"].get("source") or "?" for r in group if r["update_available"]))
+    return {"sources": sources, "outdated_sources": outdated}
 
 
 def _apply_authoritative_updates(results, spt_version):
@@ -369,7 +383,7 @@ def merge_duplicate_matches(results):
             order.append(key)
         groups[key].append(r)
 
-    return [group[0] if len(group) == 1 else _merge_group(group)
+    return [{**group[0], **_where(group)} if len(group) == 1 else _merge_group(group)
             for group in (groups[key] for key in order)]
 
 
@@ -399,12 +413,17 @@ def match_local_mods(local_mods, spt_version=None, on_progress=None, on_stage=No
     guid_batch = lookup_by_guids(
         [m.get("guid") for m in local_mods] + [g for g in cached.values() if g])
     found, absent, failed = guid_batch
+    # The same mod in client, server and headless installs shares a key:
+    # search for it once per scan, not once per copy.
+    this_run = {}
 
     for i, mod in enumerate(local_mods):
         own = (mod.get("guid") or "").casefold()
         remembered = cached.get(id(mod), "")
         if own in found or own in failed:
             result = match_one(mod, guid_batch)
+        elif _cache_key(mod) in this_run:
+            result = _result(mod, *this_run[_cache_key(mod)])
         elif remembered is None:
             # Searched recently and found nowhere: don't spend eight
             # requests learning the same thing again.
@@ -414,6 +433,7 @@ def match_local_mods(local_mods, spt_version=None, on_progress=None, on_stage=No
         else:
             result = match_one(mod, guid_batch)
             if not result["lookup_failed"]:
+                this_run[_cache_key(mod)] = (result["forge"], result["match_method"])
                 forge_guid = (result["forge"] or {}).get("guid") or None
                 if result["forge"] and not forge_guid:
                     cache.pop(_cache_key(mod), None)  # nothing to re-confirm it by

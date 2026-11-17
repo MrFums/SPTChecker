@@ -18,7 +18,10 @@ from .config import (
     TEXT_DIM, TEXT_FAINT,
 )
 from .feed import ForgeBlocked, set_wait_listener
-from .localmods import detect_spt_version, scan_installed_mods, validate_spt_root
+from .localmods import (
+    _same_folder, detect_spt_version, is_headless_install, scan_installed_mods,
+    validate_spt_root,
+)
 from .matcher import match_local_mods
 from .platform import (
     disable_show_animation, load_app_icon, set_dark_title_bar, set_dpi_aware,
@@ -96,6 +99,7 @@ class UpdateCheckerApp:
         self._results = None
         self._tab = TAB_UPDATES
         self._error = None
+        self._headless = False
 
         set_dpi_aware()
         self.root = tk.Tk()
@@ -138,9 +142,16 @@ class UpdateCheckerApp:
     def run(self):
         self.root.mainloop()
 
+    def _server_path(self):
+        """The separate server folder, or None when the game folder is it."""
+        return self.state.get("server_path") or None
+
     def _folder_valid(self):
         path = self.state.get("spt_path", "")
-        return bool(path) and validate_spt_root(path)
+        if not path or not validate_spt_root(path):
+            return False
+        server = self._server_path()
+        return not server or validate_spt_root(server)
 
     # ── Layout ────────────────────────────────────────────────────────
 
@@ -155,21 +166,29 @@ class UpdateCheckerApp:
         self._spt_chip_holder = tk.Frame(header, bg=STATUS_BG)
         self._spt_chip_holder.pack(side="right", padx=PAD_X)
 
-        # Footer: which install is being checked.
+        # Footer: which installs are being checked -- the game (client mods)
+        # and, optionally, a separate server folder that can hold a headless.
         footer = tk.Frame(self.root, bg=STATUS_BG)
         footer.pack(side="bottom", fill="x")
-        tk.Label(footer, text="SPT FOLDER", font=font(7, "bold"), fg=TEXT_FAINT,
-                 bg=STATUS_BG).pack(side="left", padx=(PAD_X, 8), pady=9)
-        change = tk.Label(footer, text="Change", font=font(9, "bold"), fg=ACCENT_NEW,
-                          bg=STATUS_BG, cursor="hand2")
-        change.pack(side="right", padx=PAD_X)
-        change.bind("<Button-1>", lambda _e: self._browse())
-        _hover_group([change], lambda: change.configure(fg=TEXT_BRIGHT),
-                     lambda: change.configure(fg=ACCENT_NEW))
-        self._path_lbl = tk.Label(footer, text="", font=font(8), fg=TEXT_DIM,
-                                  bg=STATUS_BG, anchor="w")
-        self._path_lbl.pack(side="left", fill="x", expand=True)
-        self._path_lbl.bind("<Configure>", lambda _e: self._fit_path())
+        footer.columnconfigure(1, weight=1)
+        self._path_lbls = {}
+        self._reset_lbl = None
+        for row, (key, title) in enumerate((("spt_path", "GAME"), ("server_path", "SERVER"))):
+            pad = (9 if row == 0 else 2, 2 if row == 0 else 9)
+            tk.Label(footer, text=title, font=font(7, "bold"), fg=TEXT_FAINT, bg=STATUS_BG,
+                     width=8, anchor="w").grid(row=row, column=0, padx=(PAD_X, 4), pady=pad,
+                                                sticky="w")
+            lbl = tk.Label(footer, text="", font=font(8), fg=TEXT_DIM, bg=STATUS_BG, anchor="w")
+            lbl.grid(row=row, column=1, sticky="ew", pady=pad)
+            lbl.bind("<Configure>", lambda _e: self._fit_paths())
+            self._path_lbls[key] = lbl
+            links = tk.Frame(footer, bg=STATUS_BG)
+            links.grid(row=row, column=2, padx=(8, PAD_X), pady=pad, sticky="e")
+            if key == "server_path":
+                self._reset_lbl = self._link(links, "Use game folder",
+                                             lambda: self._set_folder("server_path", None),
+                                             color=TEXT_DIM)
+            self._link(links, "Change", lambda k=key: self._browse(k)).pack(side="right")
 
         # Headline: the one number that matters, plus the Check button.
         hero = tk.Frame(self.root, bg=BG)
@@ -207,42 +226,82 @@ class UpdateCheckerApp:
         container.pack(fill="both", expand=True, pady=(0, 2))
         self._list = build_scroll_area(container)
 
-    def _fit_path(self):
-        path = self.state.get("spt_path") or "None selected"
-        width = self._path_lbl.winfo_width()
+    @staticmethod
+    def _link(parent, text, command, color=ACCENT_NEW):
+        lbl = tk.Label(parent, text=text, font=font(8, "bold"), fg=color, bg=STATUS_BG,
+                       cursor="hand2")
+        lbl.bind("<Button-1>", lambda _e: command())
+        _hover_group([lbl], lambda: lbl.configure(fg=TEXT_BRIGHT),
+                     lambda: lbl.configure(fg=color))
+        return lbl
+
+    def _fit_paths(self):
         f = font(8)
-        # Trim from the front: the install's own folder name is the tail.
-        if width > 20 and f.measure(path) > width:
-            while len(path) > 4 and f.measure("…" + path) > width:
-                path = path[1:]
-            path = "…" + path
-        self._path_lbl.configure(text=path)
+        game = self.state.get("spt_path") or "None selected"
+        server = self._server_path()
+        headless = server and self._headless
+        texts = {"spt_path": game,
+                 "server_path": (server + ("  ·  with headless" if headless else ""))
+                 if server else "Same as game folder"}
+        for key, lbl in self._path_lbls.items():
+            text, width = texts[key], lbl.winfo_width()
+            # Trim from the front: the install's own folder name is the tail.
+            if width > 20 and f.measure(text) > width:
+                while len(text) > 4 and f.measure("…" + text) > width:
+                    text = text[1:]
+                text = "…" + text
+            lbl.configure(text=text, fg=TEXT_DIM if key == "spt_path" or server else TEXT_FAINT)
 
     def _refresh_folder(self):
-        path = self.state.get("spt_path", "")
+        game = self.state.get("spt_path", "")
+        server = self._server_path()
+        self._headless = bool(server) and validate_spt_root(server) \
+            and is_headless_install(server)
         valid = self._folder_valid()
-        self._fit_path()
+        self._fit_paths()
+        if self._reset_lbl:
+            if server:
+                self._reset_lbl.pack(side="right", padx=(0, 12))
+            else:
+                self._reset_lbl.pack_forget()
         for w in self._spt_chip_holder.winfo_children():
             w.destroy()
-        version = detect_spt_version(path) if valid else None
+        version = detect_spt_version(server or game) if valid else None
+        chips = []
         if version:
-            chip(self._spt_chip_holder, f"SPT {version}", ACCENT_NEW, surface=STATUS_BG,
-                 font_size=8).pack()
-        elif path and not valid:
-            chip(self._spt_chip_holder, "Not an SPT folder", ACCENT_DANGER,
-                 surface=STATUS_BG, font_size=8).pack()
+            chips.append((f"SPT {version}", ACCENT_NEW))
+        if self._headless:
+            chips.append(("Headless", TEXT_DIM))
+        bad = [name for name, p in (("game", game), ("server", server))
+               if p and not validate_spt_root(p)]
+        if bad:
+            chips = [(f"Not an SPT {bad[0]} folder", ACCENT_DANGER)]
+        for text, color in chips:
+            chip(self._spt_chip_holder, text, color, surface=STATUS_BG,
+                 font_size=8).pack(side="left", padx=(6, 0))
         self._check_btn.configure(state="normal" if valid and not self._checking
                                   else "disabled")
 
-    def _browse(self):
+    def _browse(self, key):
         if self._checking:
             return
-        chosen = filedialog.askdirectory(parent=self.root,
-                                         initialdir=self.state.get("spt_path") or None,
-                                         title="Select your SPT install folder")
-        if not chosen:
+        title = ("Select your SPT game folder" if key == "spt_path"
+                 else "Select your SPT server folder (and headless, if it's there)")
+        chosen = filedialog.askdirectory(
+            parent=self.root, title=title,
+            initialdir=self.state.get(key) or self.state.get("spt_path") or None)
+        if chosen:
+            self._set_folder(key, os.path.normpath(chosen))
+
+    def _set_folder(self, key, path):
+        if self._checking:
             return
-        self.state["spt_path"] = os.path.normpath(chosen)
+        if key == "server_path" and path and _same_folder(path, self.state.get("spt_path", "")):
+            path = None
+        if path:
+            self.state[key] = path
+        else:
+            self.state.pop(key, None)
         self.state.pop("results", None)
         self.state.pop("checked_at", None)
         self._results = None
@@ -263,14 +322,15 @@ class UpdateCheckerApp:
         self._error = None
         self._check_btn.configure(state="disabled", text="Checking…")
         self._set_stage("Reading installed mods…", 0.0)
-        threading.Thread(target=self._bg_check, args=(path,), daemon=True).start()
+        threading.Thread(target=self._bg_check, args=(path, self._server_path()),
+                         daemon=True).start()
 
-    def _bg_check(self, path):
+    def _bg_check(self, path, server):
         set_wait_listener(lambda s: self.root.after(0, self._on_wait, s))
         try:
-            mods = scan_installed_mods(path)
+            mods = scan_installed_mods(path, server)
             results = match_local_mods(
-                mods, spt_version=detect_spt_version(path),
+                mods, spt_version=detect_spt_version(server or path),
                 on_progress=lambda d, t: self.root.after(
                     0, self._set_stage, f"Checking mod {d} of {t} on the Forge…",
                     d / t if t else 0),
@@ -369,7 +429,9 @@ class UpdateCheckerApp:
         if not self._folder_valid():
             self._count_lbl.configure(text="—", fg=TEXT_FAINT)
             self._headline_lbl.configure(text="Choose your SPT folder")
-            self._sub_lbl.configure(text="Click Change at the bottom to pick it.", fg=TEXT_DIM)
+            self._sub_lbl.configure(
+                text="Click Change next to GAME at the bottom. If your server (and "
+                     "headless) live elsewhere, set SERVER too.", fg=TEXT_DIM)
             return
         if self._results is None:
             self._count_lbl.configure(text="…", fg=TEXT_FAINT)
@@ -477,9 +539,21 @@ class UpdateCheckerApp:
         parts = [row, inner, name]
 
         if is_update:
-            meta = tk.Label(inner, text=f"by {forge.get('author') or 'Unknown'}", font=font(8),
-                            fg=TEXT_DIM, bg=BG, anchor="w")
+            meta = tk.Frame(inner, bg=BG)
             meta.grid(row=1, column=0, sticky="ew")
+            meta_parts = [tk.Label(meta, text=f"by {forge.get('author') or 'Unknown'}",
+                                   font=font(8), fg=TEXT_DIM, bg=BG)]
+            # Where it's installed; the copies that are behind in coral, so
+            # a stale headless or server copy is obvious at a glance.
+            outdated = set(r.get("outdated_sources") or [])
+            for src in r.get("sources") or []:
+                meta_parts.append(tk.Label(meta, text="·", font=font(8), fg=TEXT_FAINT, bg=BG))
+                meta_parts.append(tk.Label(
+                    meta, text=src, font=font(8, "bold" if src in outdated else "normal"),
+                    fg=ACCENT_UPD if src in outdated else TEXT_FAINT, bg=BG))
+            for w in meta_parts:
+                w.pack(side="left", padx=(0, 5))
+            parts += meta_parts
             ver = tk.Frame(inner, bg=BG)
             ver.grid(row=0, column=1, rowspan=2, padx=(14, 0))
             old = tk.Label(ver, text=r["current_version"] or "?", font=font(9),

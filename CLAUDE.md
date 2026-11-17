@@ -31,6 +31,13 @@ Fork of JoelHauser/SPTChecker with the feed, tray, toasts and registry removed.
   never hardcode pixel heights for text (fonts scale with DPI), act on a
   button release only after a press on it, and mouse wheel is dispatched
   globally (`scroll._on_global_wheel`).
+- **Split installs:** `settings.server_path` (optional) is a separate server
+  folder. Its `SPT_Runtime` mods replace the game folder's (stale) copy; its
+  `BepInEx/plugins` are a Fika headless (source `headless`). ModReader runs
+  once per root so each resolves its own dependencies.
+- **ModReader loads dependencies from a stream**, never `LoadFromAssemblyPath`:
+  memory-mapping fails with a bare `FileLoadException` on SMB shares. Rebuild
+  with `-p:DebugType=None` and copy into `assets/`.
 - Comments explain why, using `--` rather than em dashes.
 
 ## Verify
