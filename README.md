@@ -1,130 +1,42 @@
-## SPTChecker
+## SPT Mod Update Checker
 
-> **3.5.0 is the last release I'll be doing.** If you feel like picking up the torch, reach out to me — [opening an issue](https://github.com/JoelHauser/SPTChecker/issues) here is the easiest way.
+A small Windows app that checks the mods in your SPT install against the [SPT Forge](https://sp-mod.com/mods) and tells you which ones have updates.
 
-A lightweight Windows desktop app that watches the [SPT Forge](https://sp-mod.com/mods) for new and updated mods — and, optionally, checks your own installed mods against it.
+Fork of [JoelHauser/SPTChecker](https://github.com/JoelHauser/SPTChecker), cut down to just the installed-mod update check. No tray icon, notifications, startup entry or background polling.
 
-**Download** the latest zip from [Releases](https://github.com/JoelHauser/SPTChecker/releases/latest), extract it, and run the exe from wherever you keep it. Don't run it from inside the zip: Windows runs it from a temporary folder, and **Run on startup** would point there and break once that folder is cleaned up.
+### Use
 
-> **Note on antivirus flags:** A small number of vendors may flag this exe as malicious. Most of them (ALYac, Arcabit, Emsisoft, eScan, GData, VIPRE) all run BitDefender's engine under the hood and are triggering off the same single false positive detection. These are not real threats. Source code is open on GitHub.
+1. Run `SPTModChecker_v4.0.0.exe`. No Python or .NET install needed.
+2. Pick your SPT folder: the one holding `BepInEx` and `SPT_Runtime` (or `SPT` on 4.0).
+3. The check runs on launch, or click **Check for Updates**.
 
----
-
-### What it does
-
-SPTChecker runs quietly in your system tray and checks the Forge for changes every 15 minutes, or on whatever schedule you pick. When it finds something, it sends a Windows toast notification and updates the UI — no need to manually browse the Forge to stay up to date.
-
-It can also do the reverse: point it at your SPT install folder and it'll scan your actually-installed mods and tell you which ones have updates waiting (see **Local mod scanning** below) — entirely opt-in, off by default.
-
----
+Results show **Updates available** first, with installed → latest versions and an **Open** button for each mod's Forge page (or **Open all**). **Up to date** and **Not on Forge** are collapsed underneath.
 
 ### How it works
 
-1. On first launch, the app populates both columns — **New Mods** and **Updated Mods**, mirroring the website's own tabs.
-2. Both columns are built from the Forge's public API, plus its RSS feeds when you're showing all SPT versions — **no HTML scraping**.
-3. Every 15 minutes it re-fetches and compares against stored state — matching the shortest cache window sp-mod.com serves, since checking more often can't surface anything newer. Click the countdown in the status bar to check every hour, 4, 12 or 24 hours, or once a week instead, or only when you click **Check Now**. Restarting the app doesn't reset the schedule, so a daily check stays daily even if you reboot more often.
-4. Newly seen mods are flagged **New**. The Recently Updated column tracks fresh releases of existing mods.
-5. If a mod author unpublishes their mod, it's automatically removed from the display and the next mod moves up to take its place.
-6. Results persist across checks and restarts — new findings push older entries down in a rolling history (7 per column at the default size, and more fill in under the oldest as you drag the window taller, up to 25).
-7. If a check fails (site unreachable, network hiccup, rate limiting), the app doesn't crash — it shows the error in the status bar and quietly retries on the next cycle.
+- Reads each mod's real metadata (GUID, name, version) from its DLL via .NET reflection, for BepInEx plugins and SPT 4.0/4.1 server mods.
+- Matches mods to Forge listings by GUID in batches of 40, then falls back to name search with conservative fuzzy ranking. An unsure match is reported as "Not on Forge", never guessed.
+- Confirms each update with the Forge's own update service for your installed SPT version (read from `SPT.Server.exe`), so incompatible or dependency-blocked releases aren't offered.
+- Caches name matches, so a repeat check of about 100 mods takes a few seconds. The first check takes about a minute, because the Forge allows 40 API requests a minute.
 
-A full check completes in roughly two seconds. Requests are paced and automatically back off if the Forge rate-limits, so the app stays a good citizen even when a check and a local scan overlap.
+A mod can show "Not on Forge" if its internal name differs a lot from its listing, it's part of a pack, or it was removed. A mod can stay "outdated" after updating if its author didn't bump the version compiled into the DLL.
 
----
+Settings and cache are stored in `%LOCALAPPDATA%\SPTModChecker`.
 
-### UI
+### Build
 
-- **Two-panel layout** — New mods on the left, recently updated mods on the right (7 per column by default; make the window taller and more cards fill in below the oldest)
-- **Mod cards** — Each card shows the thumbnail, title, author, version, category, and description, on a rounded surface outlined in its category color. Every Forge category has its own color, including the newer **UI** category
-- **Version diff** — Updated mods show the version change inline (e.g. `1.2.3 → 1.3.0`)
-- **SPT version filter** — The **SPT** menu in the header limits both columns to mods that run on one SPT release: the latest release, the latest of a line (**Latest 4.0.x** follows new 4.0 patches as they come out), an exact release, the version of the install you've pointed **Local Mods** at, or all versions. Each mod appears at the newest version that supports your SPT, so a mod that has moved on to a newer SPT still shows the release built for yours. Compatibility comes from the Forge's own filter, not a guess. Switching versions quietly rebuilds the columns rather than announcing every mod in them, and only the filtered mods are tracked, so the Stats window follows the filter too. Defaults to the latest SPT release
-- **View Change Notes** — A small icon on updated mod cards opens a popup with that version's changelog, anchored to the card so you can see which mod it belongs to; click the same icon again (or press Escape) to close it. Rendered as actual markdown (bold, italic, inline code, headers, bullet lists, and clickable links that open in your browser) rather than a plain text dump, plus a direct "Open on Forge" button
-- **NEW badge** — Freshly detected mods are marked with a green NEW badge so you can spot changes at a glance
-- **NEW AUTHOR badge** — Mods from accounts created in the last 60 days are flagged so you can spot new community members
-- **Timestamps** — Each card shows how long ago the mod was published or updated (e.g. "2h ago", "yesterday")
-- **Hover-scrolling** — Long titles and descriptions are trimmed with an ellipsis; hover a card to smoothly scroll them and read the full text
-- **Click to open** — Click any card to open the mod page directly on the Forge
-- **Right-click menu** — Right-click any card for quick options to view change notes, open on Forge, or copy the link
-- **Category legend** — Hover the info icon in the header for a color key to every mod category
-- **Stats window** — Click **Stats** for total mods tracked, mods added this week, a 30-day chart of new mods published per day (hover any point for the exact date/count), and the top 5 authors/categories by activity in the last 30 days (rolls forward automatically, no manual reset). Author names are clickable and open their Forge profile
-- **Right-sized on first launch** — The window opens sized to show every card without scrolling, measured against your display scaling rather than assumed. After that it remembers and restores whatever size you chose. Make it taller and more cards fill in below the oldest; shrink it and both columns scroll. Resizing stays smooth either way
-- **Dark theme** — Styled to match the SPT aesthetic
+Needs Python with `requirements.txt` and PyInstaller, plus the .NET 10 SDK if you change `modreader/`.
 
----
+```bash
+python -m pytest tests
+```
 
-### Local mod scanning (opt-in)
+```bash
+python -m PyInstaller --noconfirm SPTModChecker_v4.0.0.spec
+```
 
-Click **Local Mods** to check your own installed mods against the Forge — entirely optional and off by default. If you run into anything odd, please report it.
-
-1. Point it at your SPT install folder (validated automatically — it checks for `BepInEx/plugins`, or the server mods folder under either `SPT_Runtime/` (SPT 4.1+) or `SPT/` (SPT 4.0)).
-2. Click **Scan Now**. Rather than guessing a mod's identity from its filename or code shape, the app reads each mod's *real* declared metadata via actual .NET reflection, so it works no matter how a mod author structured their code. A progress bar tracks each mod as it's checked.
-3. Each mod is matched against the Forge — exact ID lookup first, falling back to a smarter name search that handles camelCase/dotted internal names, author-prefixed names, and a full-text search, then conservative fuzzy ranking. Results are grouped into color-coded sections:
-   - **Updates Available** (orange) — full mod cards (thumbnail, version diff, changelog, right-click menu — same as the main feed), with an **Open All** button to launch every one of those mod pages at once
-   - **Up to Date** (green) — a simple clickable list linking to each mod's Forge page
-   - **Not Found on Forge** (gray) — mods that couldn't be confidently matched (see below for why)
-   - **Couldn't Check** (red) — only appears if the Forge rate-limited the scan partway through. These mods are almost certainly fine; the app just didn't manage to ask about them, and says so rather than reporting them as missing
-4. Every match is then confirmed against the Forge's own update service, using **your actual installed SPT version** (read directly from `SPT.Server.exe`). This catches things a plain version comparison can't:
-   - A newer release that isn't compatible with your SPT build is **not** offered as an update
-   - A newer release blocked by another mod's dependency requirements is **not** offered as an update
-5. Mods that ship both a client-side plugin and a separate server-side file (common for larger mods) are recognized as one logical mod and shown as a single result, not two duplicate entries. If the two halves are at different versions, both are labelled (e.g. `client 1.4.0, server 1.5.0`).
-6. A toast notification fires if any installed mods have updates available.
-7. Your folder path and last scan results are remembered across restarts and shown again next time you open **Local Mods** — but a scan only ever runs when you click **Scan Now**. It never runs automatically, on startup or otherwise.
-
-**Why a mod might show up as "Not Found on Forge":** its internal name may not closely resemble its actual Forge listing title, it may be part of a bundled mod pack rather than listed individually, it may have been removed or renamed on the Forge, or it may be a core SPT/framework component rather than an actual mod (filtered out on purpose). SPTChecker would rather report "not found" than risk flagging the wrong mod as needing an update.
-
-**A note on version numbers:** the app reports what a mod's own files declare. If an author bumps their Forge listing but forgets to update the version compiled into the mod itself, it can still read as out of date after updating. That's a mismatch in the mod's own metadata, and it has to be fixed by its author.
-
----
-
-### System tray
-
-- Closing the window minimizes to tray instead of quitting
-- Double-click the tray icon to restore the window
-- Right-click for **Show**, **Check Now**, or **Quit**
-- **Tray badge** — A red dot appears on the tray icon when there are unread changes while the app is minimized, with an unread count in the tooltip. Clears automatically when you open the window
-- Toast notifications work even while minimized
-- **Click a toast to open SPTChecker** — clicking the notification body brings the
-  window up from the tray, or starts the app if it isn't running. The **View on
-  Forge** button on the toast still goes straight to the mod page instead
-
----
-
-### Status bar
-
-- **Forge status indicator** — A dot shows whether the last check reached the Forge OK (green) or failed (red); hover for details
-- **Update available** — A green **↑ vX available** badge appears when a newer SPTChecker has been posted to the Forge; click it to open the mod page. Invisible when you're up to date, and it only ever tells you — nothing installs itself
-- **Live countdown** — Shows time remaining until the next automatic check; click it to change how often checks run, or to turn automatic checks off
-- **Running summary** — Shows the baseline mod count on first run, or how many new/updated mods were found (and total tracked) on each subsequent check
-
----
-
-### Additional features
-
-- **Run on Startup** — One-click toggle to launch silently in the background when Windows starts
-- **Thumbnails** — Downloaded only for cards actually on screen, and cached to disk for 30 days. Mods with no uploaded thumbnail, or whose thumbnail can't be fetched, get a category-colored placeholder instead of a blank box. **Currently, every card shows the placeholder:** the Forge's image host has started refusing requests from apps like this one, to keep its storage costs down. That's the Forge's call, and the app doesn't try to get around it
-- **Unpublished mod detection** — Mods removed from the Forge are automatically cleared from the display, verified in a single batched lookup rather than one request per mod
-- **Fails safe, never guesses** — Ambiguous matches are reported as unmatched rather than guessed at, and any network failure leaves the display untouched instead of hiding mods
-- **Low resource usage** — Connection pooling, shared fonts, cards reused rather than rebuilt, and a smart timer that sleeps when the window is hidden
-- **Standalone .exe** — No Python or .NET installation required: Python, its libraries and the self-contained .NET mod-reading helper are all bundled, just download and run
-- **SPT 4.0 and 4.1 server mods** — Local scanning reads server mod metadata in both the 4.0 (`AbstractModMetadata`) and 4.1 (`IModMetadata`) formats
-
----
-
-### Building from source
-
-Building requires the .NET 10 SDK and Python with `requirements.txt` plus PyInstaller installed.
-
-1. If you changed the ModReader helper, rebuild it with `dotnet publish modreader/ModReader.csproj -c Release -o modreader/publish` and copy `modreader/publish/ModReader.exe` to `assets/ModReader.exe`.
-2. Run `python -m PyInstaller --noconfirm SPTModChecker_v<VERSION>.spec`.
-
-Run `python -m pytest tests -v` for the scan regression tests (pytest is a development dependency). To also run the tests against real installs, set `SPT41_ROOT` and/or `SPT40_ROOT` to your own SPT 4.1.x / 4.0.x install directories containing server mods. Each version's tests skip when its variable is unset, and a configured directory that doesn't exist fails the test.
-
----
+To rebuild the helper, run `dotnet publish modreader/ModReader.csproj -c Release -o modreader/publish` and copy `ModReader.exe` into `assets/`. Set `SPT41_ROOT` / `SPT40_ROOT` to run the tests against a real install.
 
 ### Credits
 
-Huge thanks to **AlexTushonka** — living legend — for taking on the Forge, keeping it running at sp-mod.com, and being genuinely great to deal with. This app is only useful because that site exists.
-
-Local mod scanning was inspired by Refringe's **Check Mods** CLI.
-
-Thanks to **[scrmjt](https://github.com/scrmjt)** for the SPT version filter, the choosable check schedule, and properly centred button labels — the headline changes in 3.4.5, contributed in [#27](https://github.com/JoelHauser/SPTChecker/pull/27) — and for the SPT 4.1 server mod scanning fix in 3.4.6, contributed in [#28](https://github.com/JoelHauser/SPTChecker/pull/28).
+Original app by JoelHauser. SPT 4.1 server-mod scanning by [scrmjt](https://github.com/scrmjt). The Forge is run by AlexTushonka. Local scanning was inspired by Refringe's **Check Mods**.

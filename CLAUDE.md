@@ -1,340 +1,51 @@
-# SPTChecker — working notes for Claude
+# SPT Mod Update Checker: notes for Claude
 
-Windows tray app (Python 3.13 + Tkinter + Pillow) that watches the SPT Forge at
-sp-mod.com for new and updated mods, and optionally scans the user's installed
-mods against it. Ships as a single PyInstaller .exe.
-
-This file is loaded automatically at the start of every session. Keep it to
-things a fresh session would otherwise have to rediscover the hard way — not a
-chronological diary, which would grow without bound and cost context on every
-run. **Update the "Current state" section at the end when you finish a piece of
-work.**
-
----
+Windows app (Python + Tkinter + Pillow, shipped as one PyInstaller exe) that
+checks an SPT install's mods against the Forge (sp-mod.com) for updates.
+Fork of JoelHauser/SPTChecker with the feed, tray, toasts and registry removed.
 
 ## Layout
 
 | Module | Owns |
 | --- | --- |
-| `main.py` | Argument parsing (`--background`) and launch |
-| `sptchecker/app.py` | The main window, all state, all threading, the check cycle |
-| `sptchecker/widgets.py` | Cards, popups, scroll areas — presentation only |
-| `sptchecker/theme.py` | Colour math, cached fonts, PIL-rendered primitives |
-| `sptchecker/config.py` | Every tunable: colours, metrics, URLs, limits, feature flags |
-| `sptchecker/feed.py` | All Forge HTTP: rate limiting, retries, RSS + API parsing |
-| `sptchecker/state.py` | State file load/save/migrate, thumbnails, `compute_stats` |
-| `sptchecker/localmods.py` | Scanning an SPT install for installed mods |
-| `sptchecker/matcher.py` | Matching installed mods to Forge listings |
-| `sptchecker/platform.py` | Windows specifics: DPI, dark title bar, registry, toasts |
-| `modreader/` | Standalone .NET helper, built separately via `dotnet publish` |
+| `main.py` | Launch |
+| `sptchecker/checker.py` | The window, its state file, the check thread |
+| `sptchecker/localmods.py` | Finding mod DLLs, running ModReader, SPT version |
+| `sptchecker/matcher.py` | Matching mods to Forge listings, match cache |
+| `sptchecker/feed.py` | All Forge HTTP (rate-limited chokepoint) |
+| `sptchecker/theme.py`, `scroll.py` | Drawn widgets (pill buttons, panels, scroll area) |
+| `sptchecker/config.py` | Paths, API constants, colours |
+| `modreader/` | .NET helper, built with `dotnet publish`, copied to `assets/` |
 
-**Widgets stay dumb.** They own no network or state logic — only widgets and
-callbacks. `app.py` already owns state and threading, so it drives the work and
-calls back into the popup. Follow this when adding features; the local-scan
-window is the reference example.
+## Rules
 
-## Things that will bite you
+- **Never bypass `feed._forge_request`.** The API allows 50 requests/min per
+  IP; we use 40. The maintainer has turned on bot protection before.
+- **GUID lookups are batched** (`filter[guid]=a,b,...`, case-insensitive,
+  `per_page` capped at 50). Unsettled GUIDs fall back to single lookups.
+  Rate-limited ones are `lookup_failed`, never "not on Forge".
+- **Match cache** (`match_cache.json`): cache a miss only when the Forge
+  provably answered (`_fetch_mods` returns `[]` on network errors too).
+- **Tk on Windows:** no canvas anti-aliasing (shapes are Pillow-rendered),
+  `tk.Canvas` requests 378px wide unless `width=1`, never shadow `self._w`,
+  never hardcode pixel heights for text (fonts scale with DPI), act on a
+  button release only after a press on it, and mouse wheel is dispatched
+  globally (`scroll._on_global_wheel`).
+- Comments explain why, using `--` rather than em dashes.
 
-Each of these cost real debugging time. They are not hypothetical.
+## Verify
 
-- **Tk's canvas has no anti-aliasing on Windows.** Every rounded corner, pill
-  and glyph is drawn by Pillow at `SS` (4x) and LANCZOS-downsampled. Never draw
-  a shape with `create_oval`/`create_arc` and expect it to look acceptable.
-- **Never name an attribute `self._w` on a widget subclass.** `tkinter.Misc`
-  stores the widget's Tcl path there. Shadowing it makes every later `tk.call`
-  address a widget named `"89"`.
-- **Never hardcode a pixel height for anything containing text.** Tk font sizes
-  are in points, so they grow with Windows display scaling while a pixel
-  constant does not. `widgets.card_metrics()` measures a real card built
-  off-screen; `app._size_to_fit()` and `app._min_width()` measure the real
-  chrome. Arithmetic guesses were 2px short and clipped every description.
-- **A `RoundedPanel` with an externally managed height must push that height
-  onto its embedded frame.** Otherwise the frame keeps its own request — for a
-  `tk.Text` that is 24 lines — and the overflow is silently clipped, so the
-  Text believes it fits and never becomes scrollable.
-- **`tk.Canvas` requests a default 378px width.** In a narrower container it
-  consumes the whole cavity, and anything packed after it (a scrollbar) is
-  allocated nothing. Pass `width=1` and pack the scrollbar with `before=`.
-- **Tk centres canvas text by its line box, not its capitals.** The line box
-  keeps room for descenders, so centred labels sat 0.5px to 3px low depending
-  on display scaling and on which way Tk rounded. `theme.cap_centred_top`
-  places the baseline from `theme.CAP_HEIGHT_EM` instead; `PillButton` and
-  `ToggleSwitch` use it (measured within half a pixel, 100% to 300%). Other
-  text drawn centred on a canvas still centres the old way.
-- **Buttons must require a press before acting on a release.** Destroying a
-  window on mouse-down drops the pointer grab and the OS delivers the release
-  to whatever was underneath. See `theme.PillButton._on_press`.
-- **Wheel scrolling is dispatched globally** (`widgets._on_global_wheel`).
-  Binding `<Enter>`/`<Leave>` on a scroll canvas breaks the moment it holds
-  embedded windows, because Tk reports a Leave when the pointer enters a child.
+- `python -m pytest tests` (set `SPT41_ROOT` for real-install cases).
+- UI: build the window offline with stubbed `validate_spt_root`,
+  `detect_spt_version`, `_load_state` and `_check`, point `LOCALAPPDATA` at a
+  temp dir, and screenshot with `DwmGetWindowAttribute(hwnd, 9)` +
+  `ImageGrab`. Raise the window `-topmost` first. **Look at the screenshot.**
+- Exe: bump `config.APP_VERSION`, `version_info.py` and the `.spec` name
+  together, build with `python -m PyInstaller --noconfirm SPTModChecker_v<VER>.spec`,
+  check the `dist/` timestamp, then launch it with a temp `LOCALAPPDATA` and
+  confirm `update_checker.json` gets a `checked_at`. Kill the whole process tree.
 
-## The Forge
+## State
 
-- **The v0 API is read-only and unauthenticated.** Their docs say so
-  explicitly, and every route is a GET. There is no way to act as the user —
-  which is why endorsing is switched off behind `config.ENDORSE_ENABLED`
-  rather than implemented. Do not attempt to drive the website with a user's
-  login to work around this.
-- **Respect the rate limits.** `feed.py` meters API and media traffic on
-  separate sliding windows because the server counts them separately. The
-  maintainer has turned on bot countermeasures before. Never bypass
-  `_forge_request`.
-- **15 minutes is the poll floor**, matching the shortest cache window
-  sp-mod.com serves. Checking faster spends requests on unchanged bytes. The
-  status bar's schedule menu (`config.CHECK_INTERVAL_CHOICES`) only offers
-  intervals at or above it.
-- `published_at` (API) is the true publish time; RSS `pubDate` is when the
-  listing was *created*, often a day earlier. The stats chart counts new
-  publications only, never updates.
-- **A newly published mod appears in *both* feeds at once** -- it is
-  simultaneously the newest-created and the newest-updated thing on the site,
-  so `fetch_feeds()` returns it in both lists. `_bg_check` holds anything in
-  the new column out of the updated one; without that it filled a slot in
-  both and fired two toasts for one event. Roughly 12 of each 50-mod window
-  overlap, so this is the common case, not an edge one.
-- **`filter[spt_version]` filters mods, never their versions.** The page holds
-  only mods with *a* compatible version, but `include=versions` still lists
-  all of them (newest first by version number, not date; capped near 10 per
-  mod, though the docs say 6). `_parse_api_mod` picks the one to show with
-  `utils.spt_version_satisfies`, and a mod with its own line per SPT release is
-  the common case -- 79 of 100 compatible mods sampled showed an older version
-  than their newest.
-- **Constraints are Composer semver, typed loosely.** `~4.0` means `<5.0.0`
-  (not npm's `<4.1.0`), and live listings carry `~4.`, `~4.1. > 4.1.1`,
-  `4.0.x` and `3.7.1 - 4.1.3`, all of which the Forge accepts. The ground truth
-  is the server itself: `GET /api/v0/spt/versions?filter[spt_version]=<c>`
-  returns the releases `<c>` allows. The evaluator matched it on every
-  constraint across 183 live listings -- re-run that comparison before changing
-  it. RSS carries no constraints at all, so `fetch_feeds` skips RSS while
-  filtering.
-
-## Toast activation
-
-Clicking a toast raises the window, via a chain worth knowing before touching
-any part of it:
-
-1. `send_toast` sets winotify's `launch=SHOW_URI`, which becomes
-   `activationType="protocol"` on the toast XML.
-2. Windows shell-executes `sptchecker://show`, resolved through a scheme the
-   app registers for itself in HKCU on every launch (`register_show_protocol`).
-3. That starts a **second copy of the app**. `main.py` spots the URI before
-   argparse sees it, signals a named event, and exits.
-4. The running copy's waiter thread wakes and calls `_do_show` on the UI
-   thread. If nothing was listening the app wasn't running, so the second copy
-   stays up and shows itself instead.
-
-- **Declare argtypes/restype on every event call.** A HANDLE is 64-bit; ctypes
-  defaults returns to C int and silently truncates it, so the wait then blocks
-  on a handle that is not the event -- and a truncated handle still looks like
-  a plausible number, so it fails invisibly.
-- **The event is auto-reset, so exactly one waiter wakes per signal.** If a
-  stale instance is left running during testing it eats the wake and the app
-  under test looks broken.
-- **`Process.MainWindowHandle` does not reliably report a Tk window** -- it
-  read 0 for a window that was plainly visible. Verify visibility by
-  enumerating windows and calling `IsWindowVisible`, not through .NET.
-
-## Conventions
-
-- **Comments explain why, not what** — ideally naming the failure the code
-  prevents. Match the surrounding density; the codebase is deliberately heavy
-  on rationale because most of it encodes a bug that already happened once.
-- Prose in comments uses `--`, not em dashes.
-- `config.py` holds the tunables. Layout constants shared between modules live
-  next to the code that reads them (see `app.BODY_PAD_TOP`).
-
-## Verifying UI changes
-
-`tests/` covers only the Local Mods scan (`python -m pytest tests`; the
-real-install cases skip unless `SPT41_ROOT` / `SPT40_ROOT` are set). Nothing
-covers the UI. UI work is verified with a throwaway **offline harness** —
-rebuild it in a scratch directory rather than committing it. The pattern:
-
-1. Point `config.DATA_DIR` / `STATE_FILE` / `CACHE_DIR` at a `tempfile.mkdtemp()`
-   **before** importing `sptchecker.app`, so the user's real state is untouched.
-2. Stub `app.fetch_feeds`, `unpublished_links`, `download_thumb`,
-   `check_for_update`, `send_toast`, and `SPTCheckerApp._setup_tray`.
-3. Build the app, `root.after(...)` a callback, then screenshot the window via
-   `DwmGetWindowAttribute(hwnd, 9, ...)` + `ImageGrab.grab(bbox=...)`.
-4. **Look at the screenshot.** Most of the bugs in this app's history were
-   visible and would not have been caught by an assertion.
-
-Simulate display scaling with `root.tk.call("tk", "scaling", 1.5)` before
-building — several bugs only appear at 125%/150%.
-
-## Releasing
-
-The version lives in **three** places and they must agree (the README's old
-"Update to X" migration notice was removed after 3.5.0):
-
-1. `config.APP_VERSION` — the runtime source of truth
-2. `version_info.py` — `filevers`, `prodvers`, `FileVersion`, `ProductVersion`,
-   `OriginalFilename`
-3. `SPTModChecker_v<VER>.spec` — the filename *and* the `name=` inside it
-
-Then `python -m PyInstaller --noconfirm SPTModChecker_v<VER>.spec`.
-
-- **Avoid `--clean`.** The repo sits in a OneDrive-synced folder; sync holds a
-  lock on `build/` and `--clean` dies with `PermissionError`. Delete the build
-  folder manually if you need a cold build.
-- **Verify by artifact timestamp, not exit code.** A failed PyInstaller run can
-  leave a stale exe in `dist/` that looks like a fresh build.
-- **Smoke-test the exe before shipping.** Launch it with `--background`, confirm
-  it survives ~15s and wrote a fresh `last_check` to the state file. A frozen
-  build can fail at runtime on a missing import even when the build succeeded.
-  A launch within the check interval of the last check doesn't check at all,
-  so smoke-test against a fresh data dir (point `LOCALAPPDATA` at an empty
-  folder) or a `last_check` older than the interval.
-  Kill the whole process tree — the PyInstaller bootloader spawns a child that
-  outlives a plain kill of the parent.
-- `dist/` and `build/` are gitignored; releases go to the Forge and GitHub.
-
----
-
-## Current state
-
-**Update this section as work completes.**
-
-- **Fork: faster Local Mods scan** (branch `perf/fast-local-scan`). The scan
-  was slow because matching sent one GUID request per mod (plus up to eight
-  name/query searches on a miss) under the 40/minute API budget. Now
-  `feed.lookup_by_guids` resolves GUIDs with comma-separated `filter[guid]`
-  (confirmed live; server matches case-insensitively, `per_page` caps at 50),
-  and `matcher` keeps `match_cache.json` in `DATA_DIR`: name-search hits are
-  re-confirmed in the GUID batch, misses are skipped for
-  `MATCH_MISS_TTL_DAYS` (only cached when the Forge provably answered).
-  Measured on a 101-mod 4.1 install: about 140 requests / 3.5+ min before,
-  42 requests / 60s cold, 11 requests / 3s warm, identical results. The local
-  ModReader phase is ~1.5s warm and was left alone.
-
-- **3.5.0 is the maintainer's final release** (said at the top of the README
-  and the release notes). Anyone wanting to pick it up is asked to reach out,
-  via a GitHub issue.
-- Version **3.5.0**, working branch **`checkertest`** (not `main`).
-- Second bug pass (2026-10-26, in 3.5.0): thumbnail cache writes are atomic and
-  best-effort (concurrent fetches from the check and resize threads raced);
-  `lookup_by_guid` ignores case; `ModCard.destroy` cancels its marquee/hover
-  timers; hiding to the tray cancels a pending tooltip.
-- **3.5.0 is built and smoke-tested** (2026-10-26): `dist/SPTModChecker_v3.5.0.exe`
-  plus a matching `.zip` (exe alone at the root). It ships the cleanup pass and
-  the deepening columns described under Open Items. Smoke test against a fresh
-  data dir: alive after 25s, `last_check` written 3s after launch, filter
-  resolved to 4.1.6, pools saved 25 deep; registry backed up and restored.
-  Not yet committed, tagged, or uploaded to GitHub or the Forge. Rebuilt
-  twice in place: once for the resize-lag fix (`platform.disable_resize_repaint`
-  plus card reuse in `_render_column`), once to add the Forge's new **UI**
-  category color (`#65cf3e`, hue 104 -- the last wide gap in the wheel).
-- **Category titles come from `GET /api/v0/mod-categories`.** Check it when the
-  Forge adds a category: an unlisted title silently falls back to
-  `CATEGORY_COLOR_DEFAULT`. As of 2026-10-26 every title but "Other" has a color.
-  (Hideout sits 5 degrees from `ACCENT_NEW`, predating the spacing rule.)
-- 3.4.6 (contributed by scrmjt, PR #28) fixed SPT 4.1 server mods scanning as
-  nothing: 4.1 replaced the `AbstractModMetadata` base class with the
-  `IModMetadata` interface, and ModReader only knew the former. It now reads
-  both. Helper failures (missing exe, crash, timeout, bad JSON) raise
-  `ModReaderError` into the scan window's error view instead of reading as
-  "0 mods scanned"; a single unreadable DLL is logged and skipped. Regression
-  tests are in `tests/test_local_scan.py`; the real-install ones need
-  `SPT41_ROOT` / `SPT40_ROOT` set and skip otherwise.
-- **3.4.6 is built and smoke-tested**: `dist/SPTModChecker_v3.4.6.exe` plus a
-  matching `.zip` (exe alone at the zip root). Smoke test ran against a fresh
-  data dir: alive after 20s, `last_check` written; registry entries backed up
-  and restored. A draft GitHub release carries the zip; publishing it creates
-  the `V3.4.6` tag. The Forge upload is still by hand.
-- 3.4.0 was a full visual overhaul: `theme.py` is new, and cards, header,
-  stats, popups and window sizing were all rebuilt. 3.4.1 fixed two bugs it
-  introduced (popup close button activating the control underneath; change
-  notes clipping their last lines). 3.4.2 stopped a newly published mod
-  filling a slot in both columns and firing two toasts.
-- **3.4.5 is built and smoke-tested**: `dist/SPTModChecker_v3.4.5.exe` plus a
-  matching `.zip` (the exe alone at the zip root, same shape as previous
-  releases), tagged `V3.4.5`. Smoke test ran against a fresh data dir: alive
-  after 15s, `last_check` written, filter resolved to the newest release. The
-  binary still has to be attached to a GitHub release and uploaded to the
-  Forge by hand -- `gh` isn't signed in on either machine.
-- **Smoke-testing the exe rewrites the real registry**: `refresh_startup_if_stale`
-  points the HKCU Run entry at `dist/`, and `register_show_protocol` does the
-  same for `sptchecker://`. Back both up first and restore them after, or the
-  installed copy stops launching at startup once `dist/` is cleaned.
-- 3.4.4 carried the R2-traffic response described in Open Items: the 30-day
-  thumbnail cache and category-tinted placeholders.
-- No 3.4.1 exe was ever built -- `dist/` went straight from 3.3.3 to 3.4.2,
-  so 3.4.1's two fixes first reached users in 3.4.2.
-- 3.4.3 made a toast click raise the window (see **Toast activation**).
-- **3.4.5 is scrmjt's PR #27** (SPT version filter, check schedule,
-  cap-centred labels), the first outside contribution. It was merged with
-  their commits intact rather than squashed, so they keep authorship on
-  GitHub, and credited in the README's Credits section. Do the same for
-  future contributors.
-- Update notifications fire on a mod's **version actually changing**, not on
-  it entering the updated column. The old rule missed a genuine update to a
-  mod already sitting in the column, and announced unchanged mods that
-  drifted back into it.
-- **SPT version filter** (header picker, since 3.4.5). State keys:
-  `spt_version_filter` -- `"latest"`, `"4.0.x"` (newest of that line), a
-  release, `"auto"` (the Local Mods install) or `"all"`; absent means
-  `config.DEFAULT_SPT_VERSION_FILTER`, which is `"latest"`. `spt_versions`
-  is the release list those resolve against, refreshed by the first check
-  each day on the check thread -- not a timer, because the default can't
-  resolve without it. `last_check_spt_version` is the resolved release the
-  last check used, so a new release moving "latest" re-baselines like any
-  other filter change. Mod records taken under a filter carry `spt_version`.
-  `_bg_check` stays quiet on the check after the filter changes, and never
-  compares a version against one recorded under a different filter -- the
-  same mod is legitimately 1.3.0 for one SPT and 0.9.3 for another, and
-  comparing them was a toast and a downgrade arrow for every such mod.
-- **Check schedule** (status bar countdown, since 3.4.5). State key
-  `check_interval_minutes`: one of `config.CHECK_INTERVAL_CHOICES`, or 0 for
-  off; anything else falls back to 15. A launch no longer always checks:
-  `_start_schedule` checks only if `last_check` is older than the interval,
-  otherwise it shows the saved columns (thumbnails loaded on a thread, since
-  a cache miss would be fetched on the UI thread) and resumes the countdown.
-  A failed check retries after `max(5, interval // 12)` minutes, and never
-  when checks are off.
-
-### Open items
-
-- **Changelogs are capped at 5000 chars** (`feed.CHANGELOG_MAX_CHARS`), so a
-  long one shows less in-app than on the Forge. Raising it grows the state file.
-- **The Stats popup centres over the header**, putting its ✕ on top of the
-  Local Mods button. Harmless since buttons now require a matching press, but
-  offsetting popups below the header bar would be tidier.
-- **`theme._BUTTON_KINDS["ghost"]`** is never selected; removing it would
-  collapse the whole `kind` parameter.
-- **Cleanup pass (3.5.0)**, on top of 3.4.6: Check Now's hover
-  highlight is back (`_bind_tooltip` now binds with `add="+"`); a non-numeric
-  `Retry-After` no longer turns a 429 into a silent "not on Forge"; a malformed
-  `/mods/updates` entry is skipped instead of failing the whole scan; the
-  startup entry is compared by full command (no rewrite on every source
-  launch); dead `feed.get_session()` and matcher aliases removed.
-- **Columns deepen with the window (3.5.0).** A check keeps
-  up to `config.DISPLAY_POOL_SIZE` (25) mods per column -- saved as
-  `display_new` / `display_updated` -- and `_on_column_resize` shows as many
-  whole cards as fit, never fewer than `MAX_PER_CATEGORY`. Growing or
-  shrinking appends or trims cards at the bottom without rebuilding the rest.
-  Only on-screen cards get thumbnails up front; cards a resize adds show a
-  placeholder and fetch theirs on a thread (R2 pressure, see below). Toasts,
-  NEW badges and the new-vs-updated dedupe for notifications are still judged
-  at the default 7, so window size never changes what gets announced. Both
-  pools fit one `unpublished_links` batch -- don't raise the pool past half of
-  `PUBLISHED_CHUNK_SIZE` without accepting a second request per check.
-- **~230 MB of stale `build/` folders** for versions 2.1.1 – 3.0.0. Gitignored
-  and regenerable, but they sync to OneDrive for no reason.
-- **As of 2026-10-26 `files.sp-mod.com` answers the app's thumbnail requests
-  with 403 (Cloudflare)**, so every card shows its category placeholder. That
-  is the curb predicted below, not a bug; do not try to get around it. Noted
-  as a known issue in the 3.5.0 release notes.
-- **The Forge's R2 image storage is under cost pressure from external
-  consumers** (clodan, 2026-09-07 in Discord) and this app is caught in
-  whatever rule they use to curb it -- thumbnail fetches may start erroring
-  outright, with no alternative source planned. `THUMB_MAX_AGE_DAYS` was
-  raised 3 → 30 to match the 1 month edge cache clodan added on their end,
-  cutting repeat R2 hits per install by roughly 10x. `placeholder_thumb()`
-  (`state.py`) now tints its panel with the mod's `CATEGORY_COLORS` accent
-  instead of a flat `SEPARATOR` gray and caches one rendering per category,
-  so a run of fetch failures still reads as distinct cards instead of a wall
-  of identical gray tiles -- `download_thumb` already failed soft to this on
-  any fetch error, that part needed no change. If clodan mentions a pre-sized
-  thumbnail variant (today `download_thumb` pulls the full-resolution image
-  from R2 and downsizes to 52x52 locally, which is more bytes than
-  necessary), switching to it would cut per-request bytes too.
+- v4.0.0 (2026-11-17): single-window checker; batched GUID lookups plus the
+  match cache take a 101-mod install from ~3.5 min to 60s cold / 3s warm.

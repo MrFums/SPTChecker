@@ -1,7 +1,7 @@
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(3, 5, 0, 0),
-        prodvers=(3, 5, 0, 0),
+        filevers=(4, 0, 0, 0),
+        prodvers=(4, 0, 0, 0),
         mask=0x3F,
         flags=0x0,
         OS=0x40004,
@@ -15,13 +15,13 @@ VSVersionInfo(
                 StringTable(
                     '040904B0',
                     [
-                        StringStruct('CompanyName', 'MyButtHasARash'),
-                        StringStruct('FileDescription', 'SPTChecker - Monitors SPT Forge for new and updated mods'),
-                        StringStruct('FileVersion', '3.5.0.0'),
+                        StringStruct('CompanyName', 'MrFums'),
+                        StringStruct('FileDescription', 'SPT Mod Update Checker - checks installed SPT mods for updates'),
+                        StringStruct('FileVersion', '4.0.0.0'),
                         StringStruct('InternalName', 'SPTModChecker'),
-                        StringStruct('OriginalFilename', 'SPTModChecker_v3.5.0.exe'),
+                        StringStruct('OriginalFilename', 'SPTModChecker_v4.0.0.exe'),
                         StringStruct('ProductName', 'SPTChecker'),
-                        StringStruct('ProductVersion', '3.5.0.0'),
+                        StringStruct('ProductVersion', '4.0.0.0'),
                     ],
                 )
             ]

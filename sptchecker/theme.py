@@ -507,7 +507,9 @@ class RoundedPanel(tk.Canvas):
         if self._fixed_h:
             return
         want = self.body.winfo_reqheight() + self._pady * 2
-        if want != int(self["height"]):
+        # winfo_reqheight, not int(self["height"]): until a height is set the
+        # option still reads as Tk's default "7c", which int() rejects.
+        if want != self.winfo_reqheight():
             super().configure(height=want)
 
     def set_fill(self, fill):
