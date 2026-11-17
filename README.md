@@ -6,11 +6,11 @@ Fork of [JoelHauser/SPTChecker](https://github.com/JoelHauser/SPTChecker), cut d
 
 ### Use
 
-1. Run `SPTModChecker_v4.0.0.exe`. No Python or .NET install needed.
-2. Pick your SPT folder: the one holding `BepInEx` and `SPT_Runtime` (or `SPT` on 4.0).
-3. The check runs on launch, or click **Check for Updates**.
+1. Run `SPTModUpdateChecker.exe`. No Python or .NET install needed.
+2. Click **Change** at the bottom and pick your SPT folder: the one holding `BepInEx` and `SPT_Runtime` (or `SPT` on 4.0).
+3. The check runs on launch, or click **Check now**.
 
-Results show **Updates available** first, with installed → latest versions and an **Open** button for each mod's Forge page (or **Open all**). **Up to date** and **Not on Forge** are collapsed underneath.
+The headline shows how many mods need updating. The **Updates** tab lists each with installed → latest version; click a row to open its Forge page, or use **Open all**. **Up to date** and **Not on Forge** have their own tabs.
 
 ### How it works
 
@@ -21,7 +21,7 @@ Results show **Updates available** first, with installed → latest versions and
 
 A mod can show "Not on Forge" if its internal name differs a lot from its listing, it's part of a pack, or it was removed. A mod can stay "outdated" after updating if its author didn't bump the version compiled into the DLL.
 
-Settings and cache are stored in `%LOCALAPPDATA%\SPTModChecker`.
+Settings and cache are stored in `%LOCALAPPDATA%\SPTModUpdateChecker`. On first run it picks up your SPT folder from the original SPTChecker, if you had it.
 
 ### Build
 
@@ -32,7 +32,7 @@ python -m pytest tests
 ```
 
 ```bash
-python -m PyInstaller --noconfirm SPTModChecker_v4.0.0.spec
+python -m PyInstaller --noconfirm SPTModUpdateChecker.spec
 ```
 
 To rebuild the helper, run `dotnet publish modreader/ModReader.csproj -c Release -o modreader/publish` and copy `ModReader.exe` into `assets/`. Set `SPT41_ROOT` / `SPT40_ROOT` to run the tests against a real install.

@@ -6,12 +6,15 @@ from pathlib import Path
 
 _BUNDLE_DIR = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent.parent
 ASSETS_DIR = _BUNDLE_DIR / "assets"
-DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "SPTModChecker"
-# The old feed app's state file; read once to carry the SPT folder over.
-STATE_FILE = DATA_DIR / "spt_mods_state.json"
+APP_NAME = "SPT Mod Update Checker"
+_LOCAL = Path(os.environ.get("LOCALAPPDATA", Path.home()))
+DATA_DIR = _LOCAL / "SPTModUpdateChecker"
+# The original SPTChecker's folder: read once to carry the SPT folder and
+# match cache over, so the first check after switching is a warm one.
+LEGACY_DATA_DIR = _LOCAL / "SPTModChecker"
 
-# Keep in step with version_info.py and the .spec filename/name.
-APP_VERSION = "4.0.0"
+# Sent in the User-Agent and stamped on the exe (version_info.py).
+APP_VERSION = "1.0.0"
 
 # ── Forge API ──────────────────────────────────────────────────────────
 
@@ -50,20 +53,21 @@ MODREADER_TIMEOUT_SECONDS = 120
 
 # ── Colors ─────────────────────────────────────────────────────────────
 
-BG = "#101219"            # window background
-STATUS_BG = "#0b0d13"     # header and footer bars
-CARD_BG = "#1a1d27"       # raised surfaces
-CARD_HOVER = "#262b3a"
-SEPARATOR = "#262b38"
-BORDER = "#2f3545"
+# Neutral graphite with a teal accent: chrome bars sit lighter than the body.
+BG = "#141516"            # window body
+STATUS_BG = "#1c1d1f"     # header and footer bars
+CARD_BG = "#202123"       # hovered row, inputs, buttons
+CARD_HOVER = "#2a2b2e"
+SEPARATOR = "#26272a"
+BORDER = "#36383c"
 
-TEXT_BRIGHT = "#eef0f6"
-TEXT = "#bcc2d2"
-TEXT_DIM = "#828ba1"
-TEXT_FAINT = "#5b6377"
+TEXT_BRIGHT = "#f4f4f5"
+TEXT = "#c9cacd"
+TEXT_DIM = "#8b8d93"
+TEXT_FAINT = "#5f6167"
 
-ACCENT_NEW = "#4ad07f"     # up to date / primary action
-ACCENT_UPD = "#f2a53c"     # update available
-ACCENT_DANGER = "#ef5350"
+ACCENT_NEW = "#2ec4b6"     # teal: primary action, up to date
+ACCENT_UPD = "#ff7a45"     # coral: update available
+ACCENT_DANGER = "#e5484d"
 
-CARD_RADIUS = 8
+CARD_RADIUS = 6

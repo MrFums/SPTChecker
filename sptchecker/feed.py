@@ -13,7 +13,7 @@ from .config import (
 from .utils import parse_dt
 
 _session = requests.Session()
-_session.headers["User-Agent"] = f"SPTModChecker/{APP_VERSION}"
+_session.headers["User-Agent"] = f"SPTModUpdateChecker/{APP_VERSION}"
 _API_HEADERS = {"Accept": "application/json"}
 
 # sp-mod.com allows 50 API requests/minute per IP and times you out for a
@@ -28,6 +28,26 @@ _RETRY_AFTER_MAX = 90.0
 
 _throttle_lock = threading.Lock()
 _last_request_ts = 0.0
+
+# Called with the seconds about to be slept whenever a rate-limit wait is
+# long enough to notice, so the UI can say why it has stopped moving instead
+# of sitting on a finished progress bar for a minute.
+_wait_listener = None
+_NOTICEABLE_WAIT = 1.5
+
+
+def set_wait_listener(fn):
+    global _wait_listener
+    _wait_listener = fn
+
+
+def _sleep(seconds):
+    if seconds >= _NOTICEABLE_WAIT and _wait_listener:
+        try:
+            _wait_listener(seconds)
+        except Exception:
+            pass
+    time.sleep(seconds)
 
 
 class _RateLimiter:
@@ -48,7 +68,7 @@ class _RateLimiter:
                     self._hits.append(time.monotonic())
                     return
                 wait = self._hits[0] - cutoff
-            time.sleep(max(wait, 0.05))
+            _sleep(max(wait, 0.05))
 
 
 _api_limiter = _RateLimiter(_API_RATE_LIMIT, _RATE_WINDOW_SECONDS)
@@ -100,7 +120,7 @@ def _forge_request(method, url, retries=3, **kw):
             return resp
         if attempt == retries:
             raise ForgeRateLimited("sp-mod.com is rate limiting this client")
-        time.sleep(_retry_after_seconds(resp))
+        _sleep(_retry_after_seconds(resp))
 
 
 def _parse_api_mod(item):

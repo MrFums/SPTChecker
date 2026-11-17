@@ -40,12 +40,16 @@ Fork of JoelHauser/SPTChecker with the feed, tray, toasts and registry removed.
   `detect_spt_version`, `_load_state` and `_check`, point `LOCALAPPDATA` at a
   temp dir, and screenshot with `DwmGetWindowAttribute(hwnd, 9)` +
   `ImageGrab`. Raise the window `-topmost` first. **Look at the screenshot.**
-- Exe: bump `config.APP_VERSION`, `version_info.py` and the `.spec` name
-  together, build with `python -m PyInstaller --noconfirm SPTModChecker_v<VER>.spec`,
-  check the `dist/` timestamp, then launch it with a temp `LOCALAPPDATA` and
-  confirm `update_checker.json` gets a `checked_at`. Kill the whole process tree.
+- Exe: keep `config.APP_VERSION` and `version_info.py` in step (the exe name
+  carries no version). Build with `python -m PyInstaller --noconfirm
+  SPTModUpdateChecker.spec`, check the `dist/` timestamp, then launch it with
+  a temp `LOCALAPPDATA` and confirm `SPTModUpdateChecker\settings.json` gets a
+  `checked_at`. Kill the whole process tree.
 
 ## State
 
-- v4.0.0 (2026-11-17): single-window checker; batched GUID lookups plus the
-  match cache take a 101-mod install from ~3.5 min to 60s cold / 3s warm.
+- 1.0.0 (2026-11-17): renamed SPT Mod Update Checker, own icon and graphite
+  and teal theme, data in `%LOCALAPPDATA%\SPTModUpdateChecker` (migrates the
+  SPT folder and match cache from the old `SPTModChecker` folder). Batched GUID
+  lookups plus the match cache take a 101-mod install from ~3.5 min to 60s
+  cold / 3s warm.

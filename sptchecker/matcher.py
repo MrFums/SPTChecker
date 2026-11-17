@@ -373,7 +373,7 @@ def merge_duplicate_matches(results):
             for group in (groups[key] for key in order)]
 
 
-def match_local_mods(local_mods, spt_version=None, on_progress=None):
+def match_local_mods(local_mods, spt_version=None, on_progress=None, on_stage=None):
     """Match every locally-scanned mod against the Forge. Request pacing and
     rate-limit retry live in feed.py's request layer, not here. on_progress
     (done, total), if given, is called after each mod -- this is the slow
@@ -427,6 +427,8 @@ def match_local_mods(local_mods, spt_version=None, on_progress=None):
         if on_progress:
             on_progress(i + 1, total)
     _save_cache(cache)
+    if on_stage:
+        on_stage("Confirming updates with the Forge…")
     _apply_authoritative_updates(results, spt_version)
     return merge_duplicate_matches(results)
 

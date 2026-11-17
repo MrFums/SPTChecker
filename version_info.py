@@ -1,7 +1,7 @@
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(4, 0, 0, 0),
-        prodvers=(4, 0, 0, 0),
+        filevers=(1, 0, 0, 0),
+        prodvers=(1, 0, 0, 0),
         mask=0x3F,
         flags=0x0,
         OS=0x40004,
@@ -16,12 +16,12 @@ VSVersionInfo(
                     '040904B0',
                     [
                         StringStruct('CompanyName', 'MrFums'),
-                        StringStruct('FileDescription', 'SPT Mod Update Checker - checks installed SPT mods for updates'),
-                        StringStruct('FileVersion', '4.0.0.0'),
-                        StringStruct('InternalName', 'SPTModChecker'),
-                        StringStruct('OriginalFilename', 'SPTModChecker_v4.0.0.exe'),
-                        StringStruct('ProductName', 'SPTChecker'),
-                        StringStruct('ProductVersion', '4.0.0.0'),
+                        StringStruct('FileDescription', 'SPT Mod Update Checker'),
+                        StringStruct('FileVersion', '1.0.0.0'),
+                        StringStruct('InternalName', 'SPTModUpdateChecker'),
+                        StringStruct('OriginalFilename', 'SPTModUpdateChecker.exe'),
+                        StringStruct('ProductName', 'SPT Mod Update Checker'),
+                        StringStruct('ProductVersion', '1.0.0.0'),
                     ],
                 )
             ]

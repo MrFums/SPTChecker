@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='SPTModChecker_v4.0.0',
+    name='SPTModUpdateChecker',
     version='version_info.py',
     debug=False,
     bootloader_ignore_signals=False,

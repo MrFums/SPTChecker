@@ -314,7 +314,7 @@ class PillButton(tk.Canvas):
             if self._state == "disabled":
                 return CARD_BG, BORDER, TEXT_FAINT
             fill = lighten(self._accent, 0.12) if self._hover else self._accent
-            return fill, None, "#0c0e13"
+            return fill, None, "#0b1514"
         fill, hover_fill, outline, fg, hover_fg = _BUTTON_KINDS[self._kind]
         if self._state == "disabled":
             return fill, outline, TEXT_FAINT
@@ -333,7 +333,8 @@ class PillButton(tk.Canvas):
         self.delete("all")
         fill, outline, fg = self._colors()
         if fill or outline:
-            self._photo = pill(self._box_w, self._box_h, fill or self._bg, outline)
+            self._photo = rounded_rect(self._box_w, self._box_h, CARD_RADIUS,
+                                       fill or self._bg, outline)
             self.create_image(0, 0, anchor="nw", image=self._photo)
         self.create_text(self._box_w / 2, self._text_top, anchor="n", text=self._text,
                          font=self._font, fill=fg)

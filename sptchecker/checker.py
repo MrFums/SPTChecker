@@ -1,9 +1,9 @@
-"""Single-window update checker: pick the SPT folder, check, see what needs
-updating. Replaces the old feed/tray app -- no tray icon, no toasts, no
-registry entries, nothing runs in the background."""
+"""The app window: SPT folder, one Check button, results in three tabs.
+Nothing runs in the background and nothing is written outside DATA_DIR."""
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import tkinter as tk
@@ -13,46 +13,59 @@ from tkinter import filedialog
 from PIL import Image, ImageTk
 
 from .config import (
-    ACCENT_DANGER, ACCENT_NEW, ACCENT_UPD, APP_VERSION, BG, BORDER, CARD_BG,
-    CARD_HOVER, DATA_DIR, SEPARATOR, STATE_FILE, STATUS_BG, TEXT, TEXT_BRIGHT,
+    ACCENT_DANGER, ACCENT_NEW, ACCENT_UPD, APP_NAME, BG, CARD_BG, DATA_DIR,
+    LEGACY_DATA_DIR, MATCH_CACHE_FILE, SEPARATOR, STATUS_BG, TEXT, TEXT_BRIGHT,
     TEXT_DIM, TEXT_FAINT,
 )
-from .feed import ForgeBlocked
+from .feed import ForgeBlocked, set_wait_listener
 from .localmods import detect_spt_version, scan_installed_mods, validate_spt_root
 from .matcher import match_local_mods
 from .platform import (
     disable_show_animation, load_app_icon, set_dark_title_bar, set_dpi_aware,
 )
-from .theme import RoundedPanel, chip, ellipsize, flat_button, font, pill
 from .scroll import build_scroll_area
+from .theme import chip, ellipsize, flat_button, font
 
-CHECKER_STATE_FILE = DATA_DIR / "update_checker.json"
-DEFAULT_SIZE = (580, 680)
-MIN_SIZE = (480, 420)
+SETTINGS_FILE = DATA_DIR / "settings.json"
+DEFAULT_SIZE = (600, 700)
+MIN_SIZE = (500, 440)
+PAD_X = 22
+
+TAB_UPDATES, TAB_CURRENT, TAB_MISSING = "Updates", "Up to date", "Not on Forge"
+
+
+def _read_json(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
 
 
 def _load_state():
-    try:
-        data = json.loads(CHECKER_STATE_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return data
-    except (OSError, ValueError):
-        pass
-    # First run of this build: carry the folder over from the old app, so an
-    # existing user isn't asked to find their install again.
-    try:
-        old = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        return {"spt_path": old.get("spt_install_path", "")}
-    except (OSError, ValueError, AttributeError):
-        return {}
+    state = _read_json(SETTINGS_FILE)
+    if state is not None:
+        return state
+    # First run: take the SPT folder (and the warm match cache) from the
+    # original SPTChecker, so switching over doesn't start from scratch.
+    old = (_read_json(LEGACY_DATA_DIR / "update_checker.json") or {}).get("spt_path") \
+        or (_read_json(LEGACY_DATA_DIR / "spt_mods_state.json") or {}).get("spt_install_path")
+    legacy_cache = LEGACY_DATA_DIR / "match_cache.json"
+    if legacy_cache.is_file() and not MATCH_CACHE_FILE.exists():
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(legacy_cache, MATCH_CACHE_FILE)
+        except OSError:
+            pass
+    return {"spt_path": os.path.normpath(old)} if old else {}
 
 
 def _save_state(state):
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = CHECKER_STATE_FILE.with_suffix(".tmp")
+        tmp = SETTINGS_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(state), encoding="utf-8")
-        os.replace(tmp, CHECKER_STATE_FILE)
+        os.replace(tmp, SETTINGS_FILE)
     except OSError:
         pass
 
@@ -68,36 +81,45 @@ def _ago(ts):
     return time.strftime("%d %b %Y", time.localtime(ts))
 
 
+def _hover_group(widgets, on_enter, on_leave):
+    for w in widgets:
+        w.bind("<Enter>", lambda _e: on_enter())
+        w.bind("<Leave>", lambda _e: on_leave())
+
+
 class UpdateCheckerApp:
     def __init__(self):
         self.state = _load_state()
         self._checking = False
-        self._collapsed = {"Up to date": True, "Not on Forge": True}
-        self._last_results = None
+        self._stage_text = ""
+        self._wait_after = None
+        self._results = None
+        self._tab = TAB_UPDATES
+        self._error = None
 
         set_dpi_aware()
         self.root = tk.Tk()
-        self.root.title("SPT Mod Update Checker")
+        self.root.title(APP_NAME)
         self.root.configure(bg=BG)
         self.root.minsize(*MIN_SIZE)
         self.root.geometry(self._saved_geometry())
         set_dark_title_bar(self.root)
         disable_show_animation(self.root)
-        self._icon = ImageTk.PhotoImage(load_app_icon().resize((32, 32), Image.LANCZOS))
+        icon = load_app_icon()
+        self._icon = ImageTk.PhotoImage(icon.resize((32, 32), Image.LANCZOS))
+        self._header_icon = ImageTk.PhotoImage(icon.resize((22, 22), Image.LANCZOS))
         self.root.iconphoto(True, self._icon)
 
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
         self._refresh_folder()
 
-        cached = self.state.get("results")
-        if cached:
-            self._show_results(cached)
-        if validate_spt_root(self.state.get("spt_path", "")):
+        if self.state.get("results"):
+            self._results = self.state["results"]
+        self._render()
+        if self._folder_valid():
             # Opening the app is the request -- check straight away.
             self.root.after(300, self._check)
-        elif not cached:
-            self._message("Choose your SPT folder to check your mods for updates.")
 
     # ── Window ────────────────────────────────────────────────────────
 
@@ -116,83 +138,105 @@ class UpdateCheckerApp:
     def run(self):
         self.root.mainloop()
 
+    def _folder_valid(self):
+        path = self.state.get("spt_path", "")
+        return bool(path) and validate_spt_root(path)
+
     # ── Layout ────────────────────────────────────────────────────────
 
     def _build(self):
+        # Header bar: icon, name, installed SPT version.
         header = tk.Frame(self.root, bg=STATUS_BG)
         header.pack(fill="x")
-        inner = tk.Frame(header, bg=STATUS_BG)
-        inner.pack(fill="x", padx=18, pady=(14, 14))
-        tk.Label(inner, text="Mod Updates", font=font(13, "bold"), fg=TEXT_BRIGHT,
+        tk.Label(header, image=self._header_icon, bg=STATUS_BG).pack(
+            side="left", padx=(PAD_X - 4, 8), pady=10)
+        tk.Label(header, text=APP_NAME, font=font(10, "bold"), fg=TEXT_BRIGHT,
                  bg=STATUS_BG).pack(side="left")
-        self._spt_chip_holder = tk.Frame(inner, bg=STATUS_BG)
-        self._spt_chip_holder.pack(side="left", padx=(10, 0))
-        self._check_btn = flat_button(inner, "Check for Updates", self._check,
-                                      accent=ACCENT_NEW, bg=STATUS_BG, padx=14, pady=6)
-        self._check_btn.pack(side="right")
+        self._spt_chip_holder = tk.Frame(header, bg=STATUS_BG)
+        self._spt_chip_holder.pack(side="right", padx=PAD_X)
 
-        folder = tk.Frame(self.root, bg=BG)
-        folder.pack(fill="x", padx=18, pady=(14, 0))
-        flat_button(folder, "Change…", self._browse, bg=BG, padx=10,
-                    pady=4).pack(side="right", padx=(8, 0))
-        field = RoundedPanel(folder, fill=CARD_BG, outline=BORDER, bg=BG,
-                             padx=10, pady=5, radius=6)
-        field.pack(side="left", fill="x", expand=True)
-        self._path_lbl = tk.Label(field.body, text="", font=font(8), fg=TEXT_DIM,
-                                  bg=CARD_BG, anchor="w")
-        self._path_lbl.pack(fill="x")
-        self._path_lbl.bind("<Configure>", lambda _e: self._fit_path())
-
-        # Summary chips, or the progress bar while a check runs.
-        self._status = tk.Frame(self.root, bg=BG, height=1)
-        self._status.pack(fill="x", padx=18, pady=(12, 4))
-        self._progress_lbl = tk.Label(self._status, text="", font=font(8), fg=TEXT_DIM,
-                                      bg=BG, anchor="w")
-        self._progress_canvas = tk.Canvas(self._status, height=5, bg=BG,
-                                          highlightthickness=0, bd=0)
-        self._progress_canvas.bind("<Configure>", lambda _e: self._draw_progress())
-        self._progress_frac = 0.0
-        self._chips = tk.Frame(self._status, bg=BG)
-
+        # Footer: which install is being checked.
         footer = tk.Frame(self.root, bg=STATUS_BG)
         footer.pack(side="bottom", fill="x")
-        self._footer_lbl = tk.Label(footer, text="", font=font(8), fg=TEXT_FAINT,
-                                    bg=STATUS_BG, anchor="w")
-        self._footer_lbl.pack(side="left", padx=18, pady=6)
-        tk.Label(footer, text=f"v{APP_VERSION}", font=font(8), fg=TEXT_FAINT,
-                 bg=STATUS_BG).pack(side="right", padx=18)
+        tk.Label(footer, text="SPT FOLDER", font=font(7, "bold"), fg=TEXT_FAINT,
+                 bg=STATUS_BG).pack(side="left", padx=(PAD_X, 8), pady=9)
+        change = tk.Label(footer, text="Change", font=font(9, "bold"), fg=ACCENT_NEW,
+                          bg=STATUS_BG, cursor="hand2")
+        change.pack(side="right", padx=PAD_X)
+        change.bind("<Button-1>", lambda _e: self._browse())
+        _hover_group([change], lambda: change.configure(fg=TEXT_BRIGHT),
+                     lambda: change.configure(fg=ACCENT_NEW))
+        self._path_lbl = tk.Label(footer, text="", font=font(8), fg=TEXT_DIM,
+                                  bg=STATUS_BG, anchor="w")
+        self._path_lbl.pack(side="left", fill="x", expand=True)
+        self._path_lbl.bind("<Configure>", lambda _e: self._fit_path())
+
+        # Headline: the one number that matters, plus the Check button.
+        hero = tk.Frame(self.root, bg=BG)
+        hero.pack(fill="x", padx=PAD_X, pady=(20, 14))
+        self._check_btn = flat_button(hero, "Check now", self._check, accent=ACCENT_NEW,
+                                      bg=BG, font_size=10, padx=18, pady=8)
+        self._check_btn.pack(side="right", anchor="center")
+        text = tk.Frame(hero, bg=BG)
+        text.pack(side="left", fill="x", expand=True)
+        line = tk.Frame(text, bg=BG)
+        line.pack(anchor="w")
+        self._count_lbl = tk.Label(line, text="", font=font(26, "bold"), fg=TEXT_BRIGHT, bg=BG)
+        self._count_lbl.pack(side="left")
+        self._headline_lbl = tk.Label(line, text="", font=font(12), fg=TEXT, bg=BG)
+        self._headline_lbl.pack(side="left", padx=(10, 0), pady=(10, 0))
+        self._sub_lbl = tk.Label(text, text="", font=font(9), fg=TEXT_DIM, bg=BG, anchor="w",
+                                 justify="left")
+        self._sub_lbl.pack(anchor="w", fill="x")
+        # Wrap rather than clip: error and rate-limit messages run long.
+        text.bind("<Configure>", lambda e: self._sub_lbl.configure(
+            wraplength=max(e.width - 4, 100)))
+
+        # Thin progress line between the headline and the tabs.
+        self._progress = tk.Canvas(self.root, height=2, bg=SEPARATOR,
+                                   highlightthickness=0, bd=0)
+        self._progress.pack(fill="x")
+        self._progress.bind("<Configure>", lambda _e: self._draw_progress())
+        self._progress_frac = None
+
+        self._tabs = tk.Frame(self.root, bg=BG)
+        self._tabs.pack(fill="x", padx=PAD_X - 10, pady=(8, 0))
+        tk.Frame(self.root, bg=SEPARATOR, height=1).pack(fill="x")
 
         container = tk.Frame(self.root, bg=BG)
-        container.pack(fill="both", expand=True, padx=(18, 6), pady=(4, 12))
+        container.pack(fill="both", expand=True, pady=(0, 2))
         self._list = build_scroll_area(container)
 
     def _fit_path(self):
-        path = self.state.get("spt_path") or "No SPT folder selected"
+        path = self.state.get("spt_path") or "None selected"
         width = self._path_lbl.winfo_width()
+        f = font(8)
         # Trim from the front: the install's own folder name is the tail.
-        if width > 20 and font(8).measure(path) > width:
-            while len(path) > 4 and font(8).measure("…" + path) > width:
+        if width > 20 and f.measure(path) > width:
+            while len(path) > 4 and f.measure("…" + path) > width:
                 path = path[1:]
             path = "…" + path
         self._path_lbl.configure(text=path)
 
     def _refresh_folder(self):
         path = self.state.get("spt_path", "")
-        valid = bool(path) and validate_spt_root(path)
+        valid = self._folder_valid()
         self._fit_path()
         for w in self._spt_chip_holder.winfo_children():
             w.destroy()
         version = detect_spt_version(path) if valid else None
         if version:
-            chip(self._spt_chip_holder, f"SPT {version}", TEXT_DIM, surface=STATUS_BG,
-                 font_size=8, weight="normal").pack()
+            chip(self._spt_chip_holder, f"SPT {version}", ACCENT_NEW, surface=STATUS_BG,
+                 font_size=8).pack()
         elif path and not valid:
             chip(self._spt_chip_holder, "Not an SPT folder", ACCENT_DANGER,
-                 surface=STATUS_BG, font_size=8, weight="normal").pack()
+                 surface=STATUS_BG, font_size=8).pack()
         self._check_btn.configure(state="normal" if valid and not self._checking
                                   else "disabled")
 
     def _browse(self):
+        if self._checking:
+            return
         chosen = filedialog.askdirectory(parent=self.root,
                                          initialdir=self.state.get("spt_path") or None,
                                          title="Select your SPT install folder")
@@ -201,229 +245,274 @@ class UpdateCheckerApp:
         self.state["spt_path"] = os.path.normpath(chosen)
         self.state.pop("results", None)
         self.state.pop("checked_at", None)
+        self._results = None
+        self._error = None
         _save_state(self.state)
         self._refresh_folder()
-        if validate_spt_root(chosen):
+        self._render()
+        if self._folder_valid():
             self._check()
-        else:
-            self._message("That folder doesn't look like an SPT install -- pick the "
-                          "folder that holds BepInEx and SPT_Runtime (or SPT).")
 
     # ── Checking ──────────────────────────────────────────────────────
 
     def _check(self):
         path = self.state.get("spt_path", "")
-        if self._checking or not validate_spt_root(path):
+        if self._checking or not self._folder_valid():
             return
         self._checking = True
+        self._error = None
         self._check_btn.configure(state="disabled", text="Checking…")
-        self._show_progress("Reading installed mods…", 0.0)
+        self._set_stage("Reading installed mods…", 0.0)
         threading.Thread(target=self._bg_check, args=(path,), daemon=True).start()
 
     def _bg_check(self, path):
+        set_wait_listener(lambda s: self.root.after(0, self._on_wait, s))
         try:
             mods = scan_installed_mods(path)
             results = match_local_mods(
                 mods, spt_version=detect_spt_version(path),
-                on_progress=lambda d, t: self.root.after(0, self._on_progress, d, t))
+                on_progress=lambda d, t: self.root.after(
+                    0, self._set_stage, f"Checking mod {d} of {t} on the Forge…",
+                    d / t if t else 0),
+                on_stage=lambda text: self.root.after(0, self._set_stage, text, 1.0))
             self.root.after(0, self._on_done, results)
         except ForgeBlocked:
             self.root.after(0, self._on_error,
-                            "sp-mod.com is blocking automated requests right now. Try again later.")
+                            "sp-mod.com is blocking automated requests right now. Try later.")
         except Exception as exc:
             self.root.after(0, self._on_error, str(exc) or type(exc).__name__)
+        finally:
+            set_wait_listener(None)
 
-    def _on_progress(self, done, total):
-        self._show_progress(f"Checking {done} of {total} against the Forge…",
-                            done / total if total else 0)
+    def _set_stage(self, text, frac):
+        self._stage_text = text
+        self._progress_frac = frac
+        self._draw_progress()
+        if not self._wait_after:
+            self._sub_lbl.configure(text=text, fg=TEXT_DIM)
+        if self._results is None:
+            self._count_lbl.configure(text="…", fg=TEXT_FAINT)
+            self._headline_lbl.configure(text="Checking your mods")
+
+    def _on_wait(self, seconds):
+        """The Forge allows ~50 requests a minute; past that we wait. Count
+        it down so a stalled progress line doesn't look like a hang."""
+        if self._wait_after:
+            self.root.after_cancel(self._wait_after)
+        end = time.monotonic() + seconds
+
+        def tick():
+            left = int(end - time.monotonic() + 0.99)
+            if not self._checking or left <= 0:
+                self._wait_after = None
+                if self._checking:
+                    self._sub_lbl.configure(text=self._stage_text, fg=TEXT_DIM)
+                return
+            self._sub_lbl.configure(
+                text=f"Forge rate limit reached, resuming in {left}s…", fg=ACCENT_UPD)
+            self._wait_after = self.root.after(250, tick)
+        tick()
 
     def _on_done(self, results):
-        self._checking = False
-        self._check_btn.configure(text="Check for Updates")
+        self._finish()
+        self._results = results
         self.state["results"] = results
         self.state["checked_at"] = time.time()
         _save_state(self.state)
-        self._refresh_folder()
-        self._show_results(results)
+        self._render()
 
     def _on_error(self, msg):
+        self._finish()
+        self._error = msg
+        self._render()
+
+    def _finish(self):
         self._checking = False
-        self._check_btn.configure(text="Check for Updates")
-        self._refresh_folder()
-        self._hide_progress()
-        self._message(f"Check failed: {msg}", color=ACCENT_DANGER)
-
-    # ── Progress ──────────────────────────────────────────────────────
-
-    def _show_progress(self, text, frac):
-        self._chips.pack_forget()
-        self._progress_lbl.configure(text=text)
-        if not self._progress_lbl.winfo_ismapped():
-            self._progress_lbl.pack(fill="x", pady=(0, 5))
-            self._progress_canvas.pack(fill="x", pady=(0, 6))
-        self._progress_frac = max(0.0, min(1.0, frac))
+        self._progress_frac = None
         self._draw_progress()
-
-    def _hide_progress(self):
-        self._progress_lbl.pack_forget()
-        self._progress_canvas.pack_forget()
+        self._check_btn.configure(text="Check now")
+        self._refresh_folder()
 
     def _draw_progress(self):
-        c = self._progress_canvas
+        c = self._progress
         c.delete("all")
-        w, h = c.winfo_width(), c.winfo_height()
-        if w < 2 or h < 2:
+        w = c.winfo_width()
+        if self._progress_frac is not None and w > 1:
+            c.create_rectangle(0, 0, int(w * self._progress_frac), 3,
+                               fill=ACCENT_NEW, width=0)
+
+    # ── Rendering ─────────────────────────────────────────────────────
+
+    def _split(self):
+        r = self._results or []
+        return {
+            TAB_UPDATES: [x for x in r if x["update_available"]],
+            TAB_CURRENT: [x for x in r if x["forge"] and not x["update_available"]],
+            TAB_MISSING: [x for x in r if not x["forge"] and not x.get("lookup_failed")],
+            "unchecked": [x for x in r if not x["forge"] and x.get("lookup_failed")],
+        }
+
+    def _render(self):
+        groups = self._split()
+        self._render_headline(groups)
+        self._render_tabs(groups)
+        self._render_list(groups)
+
+    def _render_headline(self, groups):
+        if self._checking:
             return
-        self._track_img = pill(w, h, SEPARATOR)
-        c.create_image(0, 0, anchor="nw", image=self._track_img)
-        filled = int(w * self._progress_frac)
-        if filled >= h:
-            self._fill_img = pill(filled, h, ACCENT_UPD)
-            c.create_image(0, 0, anchor="nw", image=self._fill_img)
+        if self._error:
+            self._count_lbl.configure(text="!", fg=ACCENT_DANGER)
+            self._headline_lbl.configure(text="Check failed")
+            self._sub_lbl.configure(text=self._error, fg=ACCENT_DANGER)
+            return
+        if not self._folder_valid():
+            self._count_lbl.configure(text="—", fg=TEXT_FAINT)
+            self._headline_lbl.configure(text="Choose your SPT folder")
+            self._sub_lbl.configure(text="Click Change at the bottom to pick it.", fg=TEXT_DIM)
+            return
+        if self._results is None:
+            self._count_lbl.configure(text="…", fg=TEXT_FAINT)
+            self._headline_lbl.configure(text="Not checked yet")
+            self._sub_lbl.configure(text="", fg=TEXT_DIM)
+            return
+        n = len(groups[TAB_UPDATES])
+        if n:
+            self._count_lbl.configure(text=str(n), fg=ACCENT_UPD)
+            self._headline_lbl.configure(text="update available" if n == 1 else "updates available")
+        else:
+            self._count_lbl.configure(text="✓", fg=ACCENT_NEW)
+            self._headline_lbl.configure(text="All mods up to date")
+        sub = f"{len(self._results)} mods"
+        if self.state.get("checked_at"):
+            sub += f"  ·  checked {_ago(self.state['checked_at'])}"
+        if groups["unchecked"]:
+            sub += f"  ·  {len(groups['unchecked'])} couldn't be checked"
+        self._sub_lbl.configure(text=sub, fg=TEXT_DIM)
 
-    # ── Results ───────────────────────────────────────────────────────
+    def _render_tabs(self, groups):
+        for w in self._tabs.winfo_children():
+            w.destroy()
+        for name, color in ((TAB_UPDATES, ACCENT_UPD), (TAB_CURRENT, ACCENT_NEW),
+                            (TAB_MISSING, TEXT_DIM)):
+            selected = name == self._tab
+            tab = tk.Frame(self._tabs, bg=BG, cursor="hand2")
+            tab.pack(side="left", padx=(0, 4))
+            row = tk.Frame(tab, bg=BG)
+            row.pack(padx=10, pady=(4, 8))
+            label = tk.Label(row, text=name, font=font(9, "bold" if selected else "normal"),
+                             fg=TEXT_BRIGHT if selected else TEXT_DIM, bg=BG)
+            label.pack(side="left")
+            count = tk.Label(row, text=str(len(groups[name])) if self._results else "",
+                             font=font(8, "bold"), fg=color if selected else TEXT_FAINT, bg=BG)
+            count.pack(side="left", padx=(6, 0))
+            tk.Frame(tab, bg=color if selected else BG, height=2).pack(fill="x", padx=6)
+            for w in (tab, row, label, count):
+                w.bind("<Button-1>", lambda _e, n=name: self._select_tab(n))
+            if not selected:
+                _hover_group((tab, row, label, count),
+                             lambda l=label: l.configure(fg=TEXT),
+                             lambda l=label: l.configure(fg=TEXT_DIM))
 
-    def _clear(self):
+    def _select_tab(self, name):
+        if name != self._tab:
+            self._tab = name
+            self._render()
+
+    def _render_list(self, groups):
         for w in self._list.winfo_children():
             w.destroy()
+        if self._results is None:
+            return
+        rows = sorted(groups[self._tab], key=self._name_key)
+        if self._tab == TAB_UPDATES:
+            if groups["unchecked"]:
+                self._notice(f"{len(groups['unchecked'])} mods couldn't be checked: the Forge "
+                             "rate-limited the lookups. Check again in a minute.")
+            if len(rows) > 1:
+                bar = tk.Frame(self._list, bg=BG)
+                bar.pack(fill="x", padx=PAD_X, pady=(10, 2))
+                flat_button(bar, f"Open all {len(rows)} on the Forge",
+                            lambda links=[r["forge"]["link"] for r in rows]: self._open_all(links),
+                            font_size=8, padx=10, pady=3, bg=BG).pack(side="right")
+        if not rows:
+            text = {TAB_UPDATES: "Nothing to update.",
+                    TAB_CURRENT: "No mods are confirmed up to date.",
+                    TAB_MISSING: "Every mod was found on the Forge."}[self._tab]
+            tk.Label(self._list, text=text, font=font(10), fg=TEXT_FAINT, bg=BG).pack(pady=50)
+            return
+        for i, r in enumerate(rows):
+            if i:
+                tk.Frame(self._list, bg=SEPARATOR, height=1).pack(fill="x", padx=PAD_X)
+            self._row(r)
 
-    def _message(self, text, color=TEXT_FAINT):
-        self._clear()
-        tk.Label(self._list, text=text, font=font(9), fg=color, bg=BG,
-                 wraplength=420, justify="center").pack(pady=(60, 0))
-
-    def _show_results(self, results):
-        self._last_results = results
-        self._hide_progress()
-        self._clear()
-        updates = [r for r in results if r["update_available"]]
-        current = [r for r in results if r["forge"] and not r["update_available"]]
-        unchecked = [r for r in results if not r["forge"] and r.get("lookup_failed")]
-        missing = [r for r in results if not r["forge"] and not r.get("lookup_failed")]
-
-        for w in self._chips.winfo_children():
-            w.destroy()
-        parts = [(len(updates), "to update", ACCENT_UPD),
-                 (len(current), "up to date", ACCENT_NEW),
-                 (len(missing), "not on Forge", TEXT_DIM)]
-        if unchecked:
-            parts.append((len(unchecked), "couldn't check", ACCENT_DANGER))
-        for n, label, color in parts:
-            chip(self._chips, f"{n} {label}", color, surface=BG, font_size=8,
-                 weight="normal").pack(side="left", padx=(0, 6))
-        self._chips.pack(fill="x", pady=(0, 6))
-
-        checked_at = self.state.get("checked_at")
-        self._footer_lbl.configure(
-            text=f"{len(results)} mods  ·  checked {_ago(checked_at)}" if checked_at else "")
-
-        if updates:
-            links = [r["forge"]["link"] for r in updates]
-            head = self._section("Updates available", ACCENT_UPD, len(updates))
-            if len(links) > 1:
-                flat_button(head, "Open all", lambda: self._open_all(links), font_size=8,
-                            padx=8, pady=2, bg=BG).pack(side="right", padx=(0, 8))
-            for r in sorted(updates, key=self._name_key):
-                self._update_row(r)
-        else:
-            tk.Label(self._list, text="✓  Everything is up to date", font=font(11, "bold"),
-                     fg=ACCENT_NEW, bg=BG).pack(anchor="w", pady=(12, 4))
-
-        if unchecked:
-            self._section("Couldn't check", ACCENT_DANGER, len(unchecked))
-            tk.Label(self._list, text="The Forge rate-limited these. Check again in a minute.",
-                     font=font(8), fg=TEXT_DIM, bg=BG, anchor="w").pack(fill="x", pady=(0, 4))
-            for r in sorted(unchecked, key=self._name_key):
-                self._plain_row(self._local_name(r), r["current_version"])
-
-        for title, rows, color in (("Up to date", current, ACCENT_NEW),
-                                   ("Not on Forge", missing, TEXT_DIM)):
-            if not rows:
-                continue
-            self._section(title, color, len(rows), collapsible=True)
-            if not self._collapsed[title]:
-                for r in sorted(rows, key=self._name_key):
-                    self._plain_row(self._local_name(r) if not r["forge"] else
-                                    r["forge"]["title"], r["current_version"],
-                                    link=r["forge"]["link"] if r["forge"] else None)
-
-    @staticmethod
-    def _local_name(r):
-        return r["local"].get("name") or "(unknown)"
+    def _notice(self, text):
+        box = tk.Frame(self._list, bg=BG)
+        box.pack(fill="x", padx=PAD_X, pady=(12, 0))
+        tk.Frame(box, bg=ACCENT_DANGER, width=3).pack(side="left", fill="y")
+        tk.Label(box, text=text, font=font(8), fg=TEXT, bg=BG, anchor="w", justify="left",
+                 wraplength=440).pack(side="left", padx=(10, 0))
 
     @staticmethod
     def _name_key(r):
         return ((r["forge"] or {}).get("title") or r["local"].get("name") or "").casefold()
 
-    def _section(self, title, color, count, collapsible=False):
-        row = tk.Frame(self._list, bg=BG, cursor="hand2" if collapsible else "arrow")
-        row.pack(fill="x", pady=(16, 6))
-        labels = []
-        if collapsible:
-            labels.append(tk.Label(row, text="▸" if self._collapsed[title] else "▾",
-                                   font=font(9), fg=TEXT_DIM, bg=BG))
-        labels.append(tk.Label(row, text=title.upper(), font=font(8, "bold"), fg=color, bg=BG))
-        labels.append(tk.Label(row, text=str(count), font=font(8, "bold"), fg=TEXT_FAINT, bg=BG))
-        for i, lbl in enumerate(labels):
-            lbl.pack(side="left", padx=(0, 6))
-        if collapsible:
-            def toggle(_e=None):
-                self._collapsed[title] = not self._collapsed[title]
-                self._show_results(self._last_results)
-            for w in (row, *labels):
-                w.bind("<Button-1>", toggle)
-        return row
-
-    def _update_row(self, r):
+    def _row(self, r):
         forge = r["forge"]
-        panel = RoundedPanel(self._list, fill=CARD_BG, bg=BG, padx=14, pady=9)
-        panel.pack(fill="x", pady=3, padx=(0, 8))
-        body = panel.body
-        body.columnconfigure(0, weight=1)
-        name = tk.Label(body, text=forge["title"], font=font(10, "bold"), fg=TEXT_BRIGHT,
-                        bg=CARD_BG, anchor="w")
-        name.grid(row=0, column=0, sticky="ew")
-        meta = tk.Label(body, text=f"by {forge.get('author') or 'Unknown'}", font=font(8),
-                        fg=TEXT_DIM, bg=CARD_BG, anchor="w")
-        meta.grid(row=1, column=0, sticky="ew")
-        version = tk.Label(body, text=f"{r['current_version']}  →  {r['available_version']}",
-                           font=font(9), fg=ACCENT_UPD, bg=CARD_BG)
-        version.grid(row=0, column=1, rowspan=2, padx=(12, 12))
-        open_btn = flat_button(body, "Open", lambda: webbrowser.open(forge["link"]),
-                               font_size=8, padx=10, pady=3, bg=CARD_BG)
-        open_btn.grid(row=0, column=2, rowspan=2)
+        is_update = self._tab == TAB_UPDATES
+        link = forge["link"] if forge else None
+        title = forge["title"] if forge else (r["local"].get("name") or "(unknown)")
 
-        def hover(on):
-            fill = CARD_HOVER if on else CARD_BG
-            panel.set_fill(fill)
-            for w in (name, meta, version):
-                w.configure(bg=fill)
-            # PillButton.configure ignores bg (it paints its own), so the
-            # canvas behind its rounded corners is recoloured directly.
-            tk.Canvas.configure(open_btn, bg=fill)
-            open_btn._bg = fill
-            open_btn._redraw()
-        for w in (panel, body, name, meta, version):
-            w.bind("<Enter>", lambda _e: hover(True))
-            w.bind("<Leave>", lambda _e: hover(False))
-            if w is not panel:
-                w.configure(cursor="hand2")
-                w.bind("<Button-1>", lambda _e: webbrowser.open(forge["link"]))
-        name.bind("<Configure>", lambda e: name.configure(
-            text=ellipsize(font(10, "bold"), forge["title"], max(e.width, 40))))
-
-    def _plain_row(self, text, version, link=None):
         row = tk.Frame(self._list, bg=BG, cursor="hand2" if link else "arrow")
-        row.pack(fill="x", padx=(2, 8), pady=1)
-        name = tk.Label(row, text=text, font=font(9), fg=TEXT, bg=BG, anchor="w")
-        name.pack(side="left", fill="x", expand=True)
-        ver = tk.Label(row, text=version or "?", font=font(8), fg=TEXT_FAINT, bg=BG)
-        ver.pack(side="right")
+        row.pack(fill="x")
+        inner = tk.Frame(row, bg=BG)
+        inner.pack(fill="x", padx=PAD_X, pady=9 if is_update else 6)
+        inner.columnconfigure(0, weight=1)
+        name_font = font(10, "bold") if is_update else font(9)
+        name = tk.Label(inner, text=title, font=name_font,
+                        fg=TEXT_BRIGHT if is_update else TEXT, bg=BG, anchor="w")
+        name.grid(row=0, column=0, sticky="ew")
+        name.bind("<Configure>", lambda e: name.configure(
+            text=ellipsize(name_font, title, max(e.width, 40))))
+        parts = [row, inner, name]
+
+        if is_update:
+            meta = tk.Label(inner, text=f"by {forge.get('author') or 'Unknown'}", font=font(8),
+                            fg=TEXT_DIM, bg=BG, anchor="w")
+            meta.grid(row=1, column=0, sticky="ew")
+            ver = tk.Frame(inner, bg=BG)
+            ver.grid(row=0, column=1, rowspan=2, padx=(14, 0))
+            old = tk.Label(ver, text=r["current_version"] or "?", font=font(9),
+                           fg=TEXT_DIM, bg=BG)
+            arrow = tk.Label(ver, text="→", font=font(9), fg=TEXT_FAINT, bg=BG)
+            new = tk.Label(ver, text=r["available_version"] or "?", font=font(9, "bold"),
+                           fg=ACCENT_UPD, bg=BG)
+            for w in (old, arrow, new):
+                w.pack(side="left", padx=(0, 6))
+            parts += [meta, ver, old, arrow, new]
+        else:
+            ver = tk.Label(inner, text=r["current_version"] or "?", font=font(8),
+                           fg=TEXT_FAINT, bg=BG)
+            ver.grid(row=0, column=1, padx=(14, 0))
+            parts.append(ver)
+
         if link:
-            for w in (row, name, ver):
+            go = tk.Label(inner, text="↗", font=font(11), fg=TEXT_FAINT, bg=BG)
+            go.grid(row=0, column=2, rowspan=2, padx=(10, 0))
+            parts.append(go)
+
+            def enter():
+                for w in parts:
+                    w.configure(bg=CARD_BG)
+                go.configure(fg=ACCENT_NEW)
+
+            def leave():
+                for w in parts:
+                    w.configure(bg=BG)
+                go.configure(fg=TEXT_FAINT)
+            _hover_group(parts, enter, leave)
+            for w in parts:
                 w.bind("<Button-1>", lambda _e: webbrowser.open(link))
-                w.bind("<Enter>", lambda _e: name.configure(fg=TEXT_BRIGHT))
-                w.bind("<Leave>", lambda _e: name.configure(fg=TEXT))
 
     def _open_all(self, links):
         # Staggered: a burst of tabs gets some silently dropped by browsers.
