@@ -16,7 +16,10 @@ def _on_global_wheel(e):
     widget = e.widget
     while widget is not None:
         if widget in _scroll_canvases:
-            widget.yview_scroll(int(-e.delta / 40), "units")
+            # Nothing to scroll when it all fits; Tk would otherwise still
+            # nudge the view and leave the list hanging below empty space.
+            if widget.yview() != (0.0, 1.0):
+                widget.yview_scroll(int(-e.delta / 40), "units")
             return "break"
         widget = getattr(widget, "master", None)
     return None
@@ -34,8 +37,11 @@ def _sync_scrollbar(canvas, scrollbar):
             return
         canvas.update_idletasks()
         bbox = canvas.bbox("all")
-        canvas.configure(scrollregion=bbox)
         content_h = (bbox[3] - bbox[1]) if bbox else 0
+        # Never a region shorter than the view: with one, Tk lets the view
+        # sit partway down it, showing blank space above a short list.
+        canvas.configure(scrollregion=(0, 0, canvas.winfo_width(),
+                                       max(content_h, canvas.winfo_height())))
         if content_h > canvas.winfo_height():
             if not scrollbar.winfo_ismapped():
                 # before=canvas, or the expanding canvas leaves it no width.
@@ -64,6 +70,7 @@ def build_scroll_area(parent, bg=BG):
         _sync_scrollbar(canvas, scrollbar),
     ))
 
+    inner.scroll_to_top = lambda: canvas.yview_moveto(0)
     _scroll_canvases.add(canvas)
     key = str(canvas.winfo_toplevel())
     if key not in _wheel_bound:

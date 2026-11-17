@@ -14,7 +14,7 @@ DATA_DIR = _LOCAL / "SPTModUpdateChecker"
 LEGACY_DATA_DIR = _LOCAL / "SPTModChecker"
 
 # Sent in the User-Agent and stamped on the exe (version_info.py).
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 # ── Forge API ──────────────────────────────────────────────────────────
 

@@ -37,6 +37,19 @@ MIN_SIZE = (500, 440)
 PAD_X = 22
 
 TAB_UPDATES, TAB_CURRENT, TAB_MISSING = "Updates", "Up to date", "Not on Forge"
+TAB_ALL = "All installs"
+# Display names for where a copy lives; "client" is the game folder.
+PLACE_LABEL = {"client": "Game", "server": "Server", "headless": "Headless"}
+PLACE_ORDER = ("client", "server", "headless")
+
+
+def _versions(r):
+    """{source: installed version} for a result. Results saved before
+    versions were recorded fall back to the one version they kept."""
+    if r.get("versions"):
+        return r["versions"]
+    src = (r.get("sources") or [r["local"].get("source") or "client"])[0]
+    return {src: r.get("current_version") or "?"}
 
 
 def _read_json(path):
@@ -300,7 +313,7 @@ class UpdateCheckerApp:
         if version:
             chips.append((f"SPT {version}", ACCENT_NEW))
         if self._headless:
-            chips.append(("Headless", TEXT_DIM))
+            chips.append(("+ Headless", ACCENT_NEW))
         if bad:
             chips = [(f"Not an SPT {bad[0]} folder", ACCENT_DANGER)]
         for text, color in chips:
@@ -438,6 +451,7 @@ class UpdateCheckerApp:
             TAB_UPDATES: [x for x in r if x["update_available"]],
             TAB_CURRENT: [x for x in r if x["forge"] and not x["update_available"]],
             TAB_MISSING: [x for x in r if not x["forge"] and not x.get("lookup_failed")],
+            TAB_ALL: list(r),
             "unchecked": [x for x in r if not x["forge"] and x.get("lookup_failed")],
         }
 
@@ -485,7 +499,7 @@ class UpdateCheckerApp:
         for w in self._tabs.winfo_children():
             w.destroy()
         for name, color in ((TAB_UPDATES, ACCENT_UPD), (TAB_CURRENT, ACCENT_NEW),
-                            (TAB_MISSING, TEXT_DIM)):
+                            (TAB_MISSING, TEXT_DIM), (TAB_ALL, TEXT_BRIGHT)):
             selected = name == self._tab
             tab = tk.Frame(self._tabs, bg=BG, cursor="hand2")
             tab.pack(side="left", padx=(0, 4))
@@ -513,9 +527,14 @@ class UpdateCheckerApp:
     def _render_list(self, groups):
         for w in self._list.winfo_children():
             w.destroy()
+        # A new tab starts at the top, not at the last tab's scroll offset.
+        self._list.scroll_to_top()
         if self._results is None:
             return
         rows = sorted(groups[self._tab], key=self._name_key)
+        if self._tab == TAB_ALL:
+            self._render_table(rows)
+            return
         if self._tab == TAB_UPDATES:
             if groups["unchecked"]:
                 self._notice(f"{len(groups['unchecked'])} mods couldn't be checked: the Forge "
@@ -568,31 +587,36 @@ class UpdateCheckerApp:
         parts = [row, inner, name]
 
         if is_update:
+            # Second line, full width: the installed version in each place,
+            # the copies that are behind in coral, so a stale headless or
+            # server copy is obvious.
             meta = tk.Frame(inner, bg=BG)
-            meta.grid(row=1, column=0, sticky="ew")
-            meta_parts = [tk.Label(meta, text=f"by {forge.get('author') or 'Unknown'}",
-                                   font=font(8), fg=TEXT_DIM, bg=BG)]
-            # Where it's installed; the copies that are behind in coral, so
-            # a stale headless or server copy is obvious at a glance.
+            meta.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+            meta_parts = []
             outdated = set(r.get("outdated_sources") or [])
-            for src in r.get("sources") or []:
-                meta_parts.append(tk.Label(meta, text="·", font=font(8), fg=TEXT_FAINT, bg=BG))
+            versions = _versions(r)
+            for src in sorted(versions, key=lambda x: PLACE_ORDER.index(x)
+                              if x in PLACE_ORDER else 9):
+                behind = src in outdated
+                if meta_parts:
+                    meta_parts.append(tk.Label(meta, text="·", font=font(8), fg=TEXT_FAINT,
+                                               bg=BG))
                 meta_parts.append(tk.Label(
-                    meta, text=src, font=font(8, "bold" if src in outdated else "normal"),
-                    fg=ACCENT_UPD if src in outdated else TEXT_FAINT, bg=BG))
+                    meta, text=f"{PLACE_LABEL.get(src, src).lower()} {versions[src]}",
+                    font=font(8, "bold" if behind else "normal"),
+                    fg=ACCENT_UPD if behind else TEXT_DIM, bg=BG))
             for w in meta_parts:
                 w.pack(side="left", padx=(0, 5))
             parts += meta_parts
             ver = tk.Frame(inner, bg=BG)
-            ver.grid(row=0, column=1, rowspan=2, padx=(14, 0))
-            old = tk.Label(ver, text=r["current_version"] or "?", font=font(9),
-                           fg=TEXT_DIM, bg=BG)
-            arrow = tk.Label(ver, text="→", font=font(9), fg=TEXT_FAINT, bg=BG)
-            new = tk.Label(ver, text=r["available_version"] or "?", font=font(9, "bold"),
-                           fg=ACCENT_UPD, bg=BG)
-            for w in (old, arrow, new):
+            ver.grid(row=0, column=1, padx=(14, 0))
+            # Installed versions are on the line below; here, what to get.
+            labels = [tk.Label(ver, text="latest", font=font(8), fg=TEXT_FAINT, bg=BG),
+                      tk.Label(ver, text=r["available_version"] or "?",
+                               font=font(9, "bold"), fg=ACCENT_UPD, bg=BG)]
+            for w in labels:
                 w.pack(side="left", padx=(0, 6))
-            parts += [meta, ver, old, arrow, new]
+            parts += [meta, ver, *labels]
         else:
             ver = tk.Label(inner, text=r["current_version"] or "?", font=font(8),
                            fg=TEXT_FAINT, bg=BG)
@@ -616,6 +640,60 @@ class UpdateCheckerApp:
             _hover_group(parts, enter, leave)
             for w in parts:
                 w.bind("<Button-1>", lambda _e: webbrowser.open(link))
+
+    def _render_table(self, rows):
+        """Every mod with its installed version in each place and the latest
+        on the Forge, to confirm all copies really were updated."""
+        present = {src for r in rows for src in _versions(r)}
+        places = [p for p in PLACE_ORDER if p in present] + \
+            sorted(present - set(PLACE_ORDER))
+        table = tk.Frame(self._list, bg=BG)
+        table.pack(fill="x", padx=PAD_X, pady=(8, 8))
+        table.columnconfigure(0, weight=1)
+        headers = ["Mod"] + [PLACE_LABEL.get(p, p) for p in places] + ["Latest"]
+        for col, text in enumerate(headers):
+            tk.Label(table, text=text.upper(), font=font(7, "bold"), fg=TEXT_FAINT, bg=BG,
+                     anchor="w" if col == 0 else "center").grid(
+                row=0, column=col, sticky="ew", padx=8, pady=(0, 6))
+        name_font = font(9)
+        for i, r in enumerate(rows, start=1):
+            forge = r["forge"]
+            title = forge["title"] if forge else (r["local"].get("name") or "(unknown)")
+            versions = _versions(r)
+            outdated = set(r.get("outdated_sources") or [])
+            bg = CARD_BG if i % 2 == 0 else BG
+            cells = []
+            name = tk.Label(table, text=title, font=name_font, fg=TEXT, bg=bg, anchor="w", padx=8)
+            name.grid(row=i, column=0, sticky="ew", ipady=3)
+            name.bind("<Configure>", lambda e, n=name, t=title: n.configure(
+                text=ellipsize(name_font, t, max(e.width, 40))))
+            cells.append(name)
+            for col, src in enumerate(places, start=1):
+                v = versions.get(src)
+                if v is None:
+                    text, fg, weight = "—", TEXT_FAINT, "normal"
+                elif src in outdated:
+                    text, fg, weight = v, ACCENT_UPD, "bold"
+                else:
+                    text, fg, weight = v, TEXT, "normal"
+                cell = tk.Label(table, text=text, font=font(9, weight), fg=fg, bg=bg, anchor="center",
+                                padx=8)
+                # Cells touch (padding is inside each label) so a row's
+                # stripe runs unbroken across the table.
+                cell.grid(row=i, column=col, sticky="ew", ipady=3)
+                cells.append(cell)
+            latest = r["available_version"] if forge else None
+            cell = tk.Label(table, text=latest or "—", font=font(9),
+                            fg=ACCENT_NEW if latest else TEXT_FAINT, bg=bg, anchor="center", padx=8)
+            cell.grid(row=i, column=len(places) + 1, sticky="ew", ipady=3)
+            cells.append(cell)
+            if forge:
+                for c in cells:
+                    c.configure(cursor="hand2")
+                    c.bind("<Button-1>", lambda _e, link=forge["link"]: webbrowser.open(link))
+        tk.Label(self._list, text="Coral = behind the latest version the Forge offers for "
+                 "your SPT. — = not installed there.", font=font(8), fg=TEXT_FAINT, bg=BG,
+                 anchor="w").pack(fill="x", padx=PAD_X, pady=(0, 10))
 
     def _open_all(self, links):
         # Staggered: a burst of tabs gets some silently dropped by browsers.

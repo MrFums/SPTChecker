@@ -237,6 +237,13 @@ def match_one(local_mod, guid_batch=None):
 
 def _result(local_mod, forge, match_method):
     current_version = local_mod.get("version")
+    if (forge and match_method and match_method != "guid" and current_version
+            and forge.get("version") and is_newer(current_version, forge["version"])):
+        # A name-based match the installed copy is already ahead of is
+        # almost certainly a different mod: BepInEx's Configuration Manager
+        # (18.4) fuzzy-matched a 1.0.0 "Configuration Manager Input Fix".
+        # Unmatched beats wrong; an exact GUID match is trusted regardless.
+        forge, match_method = None, None
     available_version = forge.get("version") if forge else None
     update_available = bool(
         forge and available_version and current_version
@@ -296,7 +303,17 @@ def _where(group):
     sources = list(dict.fromkeys(r["local"].get("source") or "?" for r in group))
     outdated = list(dict.fromkeys(
         r["local"].get("source") or "?" for r in group if r["update_available"]))
-    return {"sources": sources, "outdated_sources": outdated}
+    # The installed version in each place, straight from that copy's own
+    # files, so every install can be checked against the others. Two DLLs
+    # of one mod in the same place at different versions are both shown.
+    versions = {}
+    for r in group:
+        src = r["local"].get("source") or "?"
+        v = r["local"].get("version") or "?"
+        if v not in versions.setdefault(src, []):
+            versions[src].append(v)
+    return {"sources": sources, "outdated_sources": outdated,
+            "versions": {src: " / ".join(vs) for src, vs in versions.items()}}
 
 
 def _apply_authoritative_updates(results, spt_version):
@@ -375,9 +392,16 @@ def merge_duplicate_matches(results):
     user, not two separate "update available" entries."""
     groups, order = {}, []
     for r in results:
-        # Unmatched entries have no forge.link to group by -- key each on its
-        # own identity so they never merge with one another.
-        key = r["forge"]["link"] if r["forge"] else id(r)
+        # Unmatched entries have no forge.link to group by. The same GUID in
+        # several installs is still one mod (one row, a version per place);
+        # without a GUID, each entry stands alone.
+        guid = (r["local"].get("guid") or "").casefold()
+        if r["forge"]:
+            key = r["forge"]["link"]
+        elif guid and not r.get("lookup_failed"):
+            key = ("unmatched", guid)
+        else:
+            key = id(r)
         if key not in groups:
             groups[key] = []
             order.append(key)

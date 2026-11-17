@@ -136,6 +136,27 @@ def test_same_mod_in_several_installs_searched_once_and_merged(monkeypatch, tmp_
     assert r["outdated_sources"] == ["headless"] and r["update_available"]
     assert r["current_version"] == "client 2.0.0, headless 1.0.0"
     assert r["available_version"] == "2.0.0"
+    assert r["versions"] == {"client": "2.0.0", "headless": "1.0.0"}
+
+
+def test_unmatched_mod_in_several_installs_is_one_row():
+    def miss(guid, source, version="1.0.0"):
+        return {"local": {"guid": guid, "name": "N", "source": source, "version": version},
+                "forge": None, "match_method": None, "current_version": version,
+                "available_version": None, "update_available": False, "lookup_failed": False}
+    merged = matcher.merge_duplicate_matches(
+        [miss("com.x", "client"), miss("COM.X", "headless", "0.9"), miss("com.y", "client")])
+    assert len(merged) == 2
+    assert merged[0]["versions"] == {"client": "1.0.0", "headless": "0.9"}
+
+
+def test_name_match_older_than_installed_is_rejected():
+    listing = _mod("forge.other", title="Configuration Manager Input Fix", version="1.0.0")
+    mod = {"guid": "com.bepis.cm", "name": "Configuration Manager", "version": "18.4"}
+    assert matcher._result(mod, listing, "fuzzy")["forge"] is None
+    assert matcher._result(mod, listing, "cached")["forge"] is None
+    # An exact GUID match is trusted even when the Forge lags behind.
+    assert matcher._result(mod, listing, "guid")["forge"] is listing
 
 
 def test_match_one_falls_back_when_unsettled(monkeypatch):
