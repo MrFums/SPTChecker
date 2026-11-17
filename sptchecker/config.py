@@ -157,6 +157,19 @@ SPT_SERVER_EXE_SUBPATHS = tuple(f"{d}/{SPT_SERVER_EXE_NAME}" for d in SERVER_DIR
 # documented cap -- chunk defensively so a large install never risks the
 # request line getting rejected/truncated by a proxy or server limit.
 MODS_UPDATES_CHUNK_SIZE = 40
+# filter[guid] accepts a comma-separated list (confirmed live), so a scan
+# resolves its GUIDs in a few requests instead of one each -- one per mod
+# under the 40/minute API budget made a 100-mod install take minutes. Kept
+# under the API's hard 50-per-page cap so a GUID shared by two listings
+# still fits on the page instead of pushing another GUID's hit off it.
+GUID_LOOKUP_CHUNK_SIZE = 40
+# Remembers which Forge listing a name search found for a mod whose own GUID
+# isn't on the Forge, so the next scan confirms it inside the GUID batch
+# instead of re-running up to eight searches. Mods found nowhere are
+# remembered too, but only for MATCH_MISS_TTL_DAYS, so a mod that gets a
+# listing later is picked up within a week.
+MATCH_CACHE_FILE = DATA_DIR / "match_cache.json"
+MATCH_MISS_TTL_DAYS = 7
 # Batched published-status lookups are bounded by the API's documented
 # per_page maximum of 50.
 PUBLISHED_CHUNK_SIZE = 50

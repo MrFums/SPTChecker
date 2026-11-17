@@ -195,6 +195,18 @@ Then `python -m PyInstaller --noconfirm SPTModChecker_v<VER>.spec`.
 
 **Update this section as work completes.**
 
+- **Fork: faster Local Mods scan** (branch `perf/fast-local-scan`). The scan
+  was slow because matching sent one GUID request per mod (plus up to eight
+  name/query searches on a miss) under the 40/minute API budget. Now
+  `feed.lookup_by_guids` resolves GUIDs with comma-separated `filter[guid]`
+  (confirmed live; server matches case-insensitively, `per_page` caps at 50),
+  and `matcher` keeps `match_cache.json` in `DATA_DIR`: name-search hits are
+  re-confirmed in the GUID batch, misses are skipped for
+  `MATCH_MISS_TTL_DAYS` (only cached when the Forge provably answered).
+  Measured on a 101-mod 4.1 install: about 140 requests / 3.5+ min before,
+  42 requests / 60s cold, 11 requests / 3s warm, identical results. The local
+  ModReader phase is ~1.5s warm and was left alone.
+
 - **3.5.0 is the maintainer's final release** (said at the top of the README
   and the release notes). Anyone wanting to pick it up is asked to reach out,
   via a GitHub issue.

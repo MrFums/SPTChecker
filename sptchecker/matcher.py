@@ -1,9 +1,13 @@
 import difflib
+import json
+import os
 import re
+import time
 
-from .config import FUZZY_MATCH_THRESHOLD
+from .config import FUZZY_MATCH_THRESHOLD, MATCH_CACHE_FILE, MATCH_MISS_TTL_DAYS
 from .feed import (
-    ForgeRateLimited, lookup_by_guid, lookup_by_name, lookup_by_query, lookup_updates,
+    ForgeRateLimited, lookup_by_guid, lookup_by_guids, lookup_by_name, lookup_by_query,
+    lookup_updates,
 )
 # Version comparison lives in utils -- the app's own update check needs the
 # same "is this actually newer" rule this does. Why it matters here: a matched
@@ -166,10 +170,26 @@ def _rank_candidates(candidates, name, author=None, original_name=None):
     return None, None
 
 
-def match_one(local_mod):
+def _failed_result(local_mod):
+    return {
+        "local": local_mod,
+        "forge": None,
+        "match_method": None,
+        "current_version": local_mod.get("version"),
+        "available_version": None,
+        "update_available": False,
+        "lookup_failed": True,
+    }
+
+
+def match_one(local_mod, guid_batch=None):
     """Match a single locally-scanned mod against the Forge. GUID lookup is
     tried first (exact, cheap); falls back to a name search + ranking cascade
     only when there's no clean GUID or the GUID lookup missed.
+
+    guid_batch, if given, is lookup_by_guids' (found, absent, failed) answer
+    for the whole scan, so the GUID step costs no request of its own here.
+    A GUID the batch didn't settle still gets the old single lookup.
 
     Sets lookup_failed when the Forge rate-limited us rather than answering.
     That case has to stay distinct from an honest miss: every lookup here
@@ -178,8 +198,17 @@ def match_one(local_mod):
     from the Forge, blaming the mods for the app's own request rate.
     """
     guid = local_mod.get("guid")
+    key = guid.casefold() if guid else None
+    found, absent, failed = guid_batch or ({}, set(), set())
+    if key in failed:
+        return _failed_result(local_mod)
     try:
-        forge = lookup_by_guid(guid) if guid else None
+        if not guid or key in absent:
+            forge = None
+        elif key in found:
+            forge = found[key]
+        else:
+            forge = lookup_by_guid(guid)
         match_method = "guid" if forge else None
 
         if not forge:
@@ -202,16 +231,11 @@ def match_one(local_mod):
             if forge:
                 match_method = f"query_{match_method}"
     except ForgeRateLimited:
-        return {
-            "local": local_mod,
-            "forge": None,
-            "match_method": None,
-            "current_version": local_mod.get("version"),
-            "available_version": None,
-            "update_available": False,
-            "lookup_failed": True,
-        }
+        return _failed_result(local_mod)
+    return _result(local_mod, forge, match_method)
 
+
+def _result(local_mod, forge, match_method):
     current_version = local_mod.get("version")
     available_version = forge.get("version") if forge else None
     update_available = bool(
@@ -362,9 +386,70 @@ def match_local_mods(local_mods, spt_version=None, on_progress=None):
     install with no SPT.Server.exe."""
     results = []
     total = len(local_mods)
+    cache = _load_cache()
+    now = time.time()
+    cached = {}
+    for mod in local_mods:
+        entry = cache.get(_cache_key(mod))
+        if entry and (entry.get("forge_guid")
+                      or now - entry.get("ts", 0) < MATCH_MISS_TTL_DAYS * 86400):
+            cached[id(mod)] = entry.get("forge_guid")
+    # Cached Forge GUIDs ride along in the same batch, so a remembered name
+    # match is re-confirmed (and its latest version fetched) for free.
+    guid_batch = lookup_by_guids(
+        [m.get("guid") for m in local_mods] + [g for g in cached.values() if g])
+    found, absent, failed = guid_batch
+
     for i, mod in enumerate(local_mods):
-        results.append(match_one(mod))
+        own = (mod.get("guid") or "").casefold()
+        remembered = cached.get(id(mod), "")
+        if own in found or own in failed:
+            result = match_one(mod, guid_batch)
+        elif remembered is None:
+            # Searched recently and found nowhere: don't spend eight
+            # requests learning the same thing again.
+            result = _result(mod, None, None)
+        elif remembered and remembered.casefold() in found:
+            result = _result(mod, found[remembered.casefold()], "cached")
+        else:
+            result = match_one(mod, guid_batch)
+            if not result["lookup_failed"]:
+                forge_guid = (result["forge"] or {}).get("guid") or None
+                if result["forge"] and not forge_guid:
+                    cache.pop(_cache_key(mod), None)  # nothing to re-confirm it by
+                elif forge_guid or own in absent:
+                    # A miss is only remembered when the Forge provably
+                    # answered for this mod: _fetch_mods turns a network
+                    # error into [], and caching that would hide a listed
+                    # mod as "not on Forge" for a week.
+                    cache[_cache_key(mod)] = {"forge_guid": forge_guid, "ts": now}
+        results.append(result)
         if on_progress:
             on_progress(i + 1, total)
+    _save_cache(cache)
     _apply_authoritative_updates(results, spt_version)
     return merge_duplicate_matches(results)
+
+
+def _cache_key(mod):
+    return f"{(mod.get('guid') or '').casefold()}|{mod.get('name') or ''}"
+
+
+def _load_cache():
+    try:
+        data = json.loads(MATCH_CACHE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_cache(cache):
+    """Best-effort and atomic: a cache that fails to save only costs the next
+    scan its searches, never the scan that is finishing now."""
+    try:
+        MATCH_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = MATCH_CACHE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache), encoding="utf-8")
+        os.replace(tmp, MATCH_CACHE_FILE)
+    except OSError:
+        pass

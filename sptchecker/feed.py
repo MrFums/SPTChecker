@@ -10,7 +10,7 @@ import requests
 
 from .config import (
     API_MOD_URL, API_MODS_UPDATES_URL, API_SPT_VERSIONS_URL, API_URL, APP_VERSION,
-    DC_NS, FEED_URL, FEED_UPDATED_URL, MODS_UPDATES_CHUNK_SIZE,
+    DC_NS, FEED_URL, FEED_UPDATED_URL, GUID_LOOKUP_CHUNK_SIZE, MODS_UPDATES_CHUNK_SIZE,
     PUBLISHED_CHUNK_SIZE as _PUBLISHED_CHUNK_SIZE,
 )
 from .utils import parse_dt, spt_version_satisfies
@@ -326,6 +326,46 @@ def lookup_by_guid(guid):
     if len(mods) != 1 or (mods[0].get("guid") or "").casefold() != guid.casefold():
         return None
     return mods[0]
+
+
+def lookup_by_guids(guids):
+    """Batch form of lookup_by_guid: one request per GUID_LOOKUP_CHUNK_SIZE
+    GUIDs instead of one per GUID.
+
+    Returns (found, absent, failed), all keyed by casefolded GUID:
+    - found: {guid: forge_mod} where exactly one listing carries that GUID,
+      the same rule lookup_by_guid applies.
+    - absent: GUIDs the Forge definitely answered for with no single listing
+      (none, or ambiguous), so the caller can go straight to name search.
+    - failed: GUIDs whose chunk was rate limited -- unknown, not missing.
+
+    A GUID in none of the three wasn't settled (a chunk that came back empty,
+    which _fetch_mods also returns on a network error, or a full page that
+    might have pushed its hit off the end); callers fall back to
+    lookup_by_guid for those, which is exactly the old per-mod behaviour.
+    """
+    wanted = list(dict.fromkeys(
+        g.casefold() for g in guids if g and "," not in g))
+    found, absent, failed = {}, set(), set()
+    for i in range(0, len(wanted), GUID_LOOKUP_CHUNK_SIZE):
+        chunk = wanted[i:i + GUID_LOOKUP_CHUNK_SIZE]
+        try:
+            mods = _fetch_mods({"filter[guid]": ",".join(chunk), "per_page": 50})
+        except ForgeRateLimited:
+            failed.update(chunk)
+            continue
+        if not mods or len(mods) >= 50:
+            continue
+        by_guid = {}
+        for mod in mods:
+            by_guid.setdefault((mod.get("guid") or "").casefold(), []).append(mod)
+        for guid in chunk:
+            hits = by_guid.get(guid, [])
+            if len(hits) == 1:
+                found[guid] = hits[0]
+            else:
+                absent.add(guid)
+    return found, absent, failed
 
 
 def lookup_by_name(name):
