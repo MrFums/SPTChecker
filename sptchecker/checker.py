@@ -8,18 +8,20 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
+from pathlib import Path
 from tkinter import filedialog
 
 from PIL import Image, ImageTk
 
 from .config import (
-    ACCENT_DANGER, ACCENT_NEW, ACCENT_UPD, APP_NAME, BG, CARD_BG, DATA_DIR,
+    ACCENT_DANGER, ACCENT_NEW, ACCENT_UPD, APP_NAME, BEPINEX_PLUGINS_SUBPATH, BG, CARD_BG,
+    DATA_DIR,
     LEGACY_DATA_DIR, MATCH_CACHE_FILE, SEPARATOR, STATUS_BG, TEXT, TEXT_BRIGHT,
     TEXT_DIM, TEXT_FAINT,
 )
 from .feed import ForgeBlocked, set_wait_listener
 from .localmods import (
-    _same_folder, detect_spt_version, is_headless_install, scan_installed_mods,
+    _same_folder, detect_spt_version, resolve_headless_root, scan_installed_mods,
     validate_spt_root,
 )
 from .matcher import match_local_mods
@@ -146,12 +148,28 @@ class UpdateCheckerApp:
         """The separate server folder, or None when the game folder is it."""
         return self.state.get("server_path") or None
 
+    def _headless_root(self):
+        """The headless folder in use: the one set, or one auto-detected in
+        a separate server folder, or None."""
+        game = self.state.get("spt_path", "")
+        return resolve_headless_root(game, self._server_path(),
+                                     self.state.get("headless_path")) if game else None
+
+    def _bad_folders(self):
+        """Names of folders that are set but don't look right."""
+        bad = []
+        game, server = self.state.get("spt_path", ""), self._server_path()
+        headless = self.state.get("headless_path")
+        if game and not validate_spt_root(game):
+            bad.append("game")
+        if server and not validate_spt_root(server):
+            bad.append("server")
+        if headless and not (Path(headless) / BEPINEX_PLUGINS_SUBPATH).is_dir():
+            bad.append("headless")
+        return bad
+
     def _folder_valid(self):
-        path = self.state.get("spt_path", "")
-        if not path or not validate_spt_root(path):
-            return False
-        server = self._server_path()
-        return not server or validate_spt_root(server)
+        return bool(self.state.get("spt_path")) and not self._bad_folders()
 
     # ── Layout ────────────────────────────────────────────────────────
 
@@ -166,17 +184,21 @@ class UpdateCheckerApp:
         self._spt_chip_holder = tk.Frame(header, bg=STATUS_BG)
         self._spt_chip_holder.pack(side="right", padx=PAD_X)
 
-        # Footer: which installs are being checked -- the game (client mods)
-        # and, optionally, a separate server folder that can hold a headless.
+        # Footer: which installs are being checked -- the game (client mods),
+        # optionally a separate server, and optionally a headless client,
+        # which may sit in the server folder or in a folder of its own.
         footer = tk.Frame(self.root, bg=STATUS_BG)
         footer.pack(side="bottom", fill="x")
         footer.columnconfigure(1, weight=1)
         self._path_lbls = {}
-        self._reset_lbl = None
-        for row, (key, title) in enumerate((("spt_path", "GAME"), ("server_path", "SERVER"))):
-            pad = (9 if row == 0 else 2, 2 if row == 0 else 9)
+        self._reset_lbls = {}
+        rows = (("spt_path", "GAME", None),
+                ("server_path", "SERVER", "Use game folder"),
+                ("headless_path", "HEADLESS", "Auto-detect"))
+        for row, (key, title, reset) in enumerate(rows):
+            pad = (9 if row == 0 else 2, 9 if row == len(rows) - 1 else 2)
             tk.Label(footer, text=title, font=font(7, "bold"), fg=TEXT_FAINT, bg=STATUS_BG,
-                     width=8, anchor="w").grid(row=row, column=0, padx=(PAD_X, 4), pady=pad,
+                     anchor="w").grid(row=row, column=0, padx=(PAD_X, 12), pady=pad,
                                                 sticky="w")
             lbl = tk.Label(footer, text="", font=font(8), fg=TEXT_DIM, bg=STATUS_BG, anchor="w")
             lbl.grid(row=row, column=1, sticky="ew", pady=pad)
@@ -184,10 +206,9 @@ class UpdateCheckerApp:
             self._path_lbls[key] = lbl
             links = tk.Frame(footer, bg=STATUS_BG)
             links.grid(row=row, column=2, padx=(8, PAD_X), pady=pad, sticky="e")
-            if key == "server_path":
-                self._reset_lbl = self._link(links, "Use game folder",
-                                             lambda: self._set_folder("server_path", None),
-                                             color=TEXT_DIM)
+            if reset:
+                self._reset_lbls[key] = self._link(
+                    links, reset, lambda k=key: self._set_folder(k, None), color=TEXT_DIM)
             self._link(links, "Change", lambda k=key: self._browse(k)).pack(side="right")
 
         # Headline: the one number that matters, plus the Check button.
@@ -239,10 +260,18 @@ class UpdateCheckerApp:
         f = font(8)
         game = self.state.get("spt_path") or "None selected"
         server = self._server_path()
-        headless = server and self._headless
+        headless_set = self.state.get("headless_path")
+        headless = self._headless_root()
+        if headless_set:
+            headless_text = headless_set
+        elif headless:
+            headless_text = "Auto: found in the server folder"
+        else:
+            headless_text = "None found -- set it if your headless has its own folder"
         texts = {"spt_path": game,
-                 "server_path": (server + ("  ·  with headless" if headless else ""))
-                 if server else "Same as game folder"}
+                 "server_path": server or "Same as game folder",
+                 "headless_path": headless_text}
+        dim = {"spt_path": True, "server_path": bool(server), "headless_path": bool(headless)}
         for key, lbl in self._path_lbls.items():
             text, width = texts[key], lbl.winfo_width()
             # Trim from the front: the install's own folder name is the tail.
@@ -250,20 +279,20 @@ class UpdateCheckerApp:
                 while len(text) > 4 and f.measure("…" + text) > width:
                     text = text[1:]
                 text = "…" + text
-            lbl.configure(text=text, fg=TEXT_DIM if key == "spt_path" or server else TEXT_FAINT)
+            lbl.configure(text=text, fg=TEXT_DIM if dim[key] else TEXT_FAINT)
 
     def _refresh_folder(self):
         game = self.state.get("spt_path", "")
         server = self._server_path()
-        self._headless = bool(server) and validate_spt_root(server) \
-            and is_headless_install(server)
+        bad = self._bad_folders()
+        self._headless = "headless" not in bad and bool(self._headless_root())
         valid = self._folder_valid()
         self._fit_paths()
-        if self._reset_lbl:
-            if server:
-                self._reset_lbl.pack(side="right", padx=(0, 12))
+        for key, lbl in self._reset_lbls.items():
+            if self.state.get(key):
+                lbl.pack(side="right", padx=(0, 12))
             else:
-                self._reset_lbl.pack_forget()
+                lbl.pack_forget()
         for w in self._spt_chip_holder.winfo_children():
             w.destroy()
         version = detect_spt_version(server or game) if valid else None
@@ -272,8 +301,6 @@ class UpdateCheckerApp:
             chips.append((f"SPT {version}", ACCENT_NEW))
         if self._headless:
             chips.append(("Headless", TEXT_DIM))
-        bad = [name for name, p in (("game", game), ("server", server))
-               if p and not validate_spt_root(p)]
         if bad:
             chips = [(f"Not an SPT {bad[0]} folder", ACCENT_DANGER)]
         for text, color in chips:
@@ -285,8 +312,9 @@ class UpdateCheckerApp:
     def _browse(self, key):
         if self._checking:
             return
-        title = ("Select your SPT game folder" if key == "spt_path"
-                 else "Select your SPT server folder (and headless, if it's there)")
+        title = {"spt_path": "Select your SPT game folder",
+                 "server_path": "Select your SPT server folder",
+                 "headless_path": "Select your Fika headless client folder"}[key]
         chosen = filedialog.askdirectory(
             parent=self.root, title=title,
             initialdir=self.state.get(key) or self.state.get("spt_path") or None)
@@ -296,8 +324,8 @@ class UpdateCheckerApp:
     def _set_folder(self, key, path):
         if self._checking:
             return
-        if key == "server_path" and path and _same_folder(path, self.state.get("spt_path", "")):
-            path = None
+        if key != "spt_path" and path and _same_folder(path, self.state.get("spt_path", "")):
+            path = None  # the game folder is the default for the server already
         if path:
             self.state[key] = path
         else:
@@ -322,13 +350,14 @@ class UpdateCheckerApp:
         self._error = None
         self._check_btn.configure(state="disabled", text="Checking…")
         self._set_stage("Reading installed mods…", 0.0)
-        threading.Thread(target=self._bg_check, args=(path, self._server_path()),
+        threading.Thread(target=self._bg_check,
+                         args=(path, self._server_path(), self.state.get("headless_path")),
                          daemon=True).start()
 
-    def _bg_check(self, path, server):
+    def _bg_check(self, path, server, headless):
         set_wait_listener(lambda s: self.root.after(0, self._on_wait, s))
         try:
-            mods = scan_installed_mods(path, server)
+            mods = scan_installed_mods(path, server, headless)
             results = match_local_mods(
                 mods, spt_version=detect_spt_version(server or path),
                 on_progress=lambda d, t: self.root.after(
@@ -430,8 +459,8 @@ class UpdateCheckerApp:
             self._count_lbl.configure(text="—", fg=TEXT_FAINT)
             self._headline_lbl.configure(text="Choose your SPT folder")
             self._sub_lbl.configure(
-                text="Click Change next to GAME at the bottom. If your server (and "
-                     "headless) live elsewhere, set SERVER too.", fg=TEXT_DIM)
+                text="Click Change next to GAME at the bottom. If your server or "
+                     "headless live elsewhere, set those too.", fg=TEXT_DIM)
             return
         if self._results is None:
             self._count_lbl.configure(text="…", fg=TEXT_FAINT)

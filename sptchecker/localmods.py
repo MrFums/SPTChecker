@@ -237,49 +237,64 @@ def _same_folder(a, b):
         return str(a).casefold() == str(b).casefold()
 
 
-def is_headless_install(root):
-    """A Fika headless client: its own game install, usually beside the
-    server, with its own BepInEx plugins that go stale independently."""
-    root = Path(root)
-    return ((root / "HeadlessConfig.json").is_file()
-            or any((root / BEPINEX_PLUGINS_SUBPATH).rglob("Fika.Headless.dll")))
+def resolve_headless_root(spt_root, server_root=None, headless_root=None):
+    """The headless client's folder, or None.
+
+    An explicit headless_root wins. Otherwise a separate server folder that
+    has its own BepInEx plugins is taken to hold the headless (the common
+    Fika setup). A headless can't share the game folder: those plugins are
+    the client's.
+    """
+    if headless_root:
+        return None if _same_folder(headless_root, spt_root) else headless_root
+    if server_root and not _same_folder(server_root, spt_root)             and (Path(server_root) / BEPINEX_PLUGINS_SUBPATH).is_dir():
+        return server_root
+    return None
 
 
-def scan_installed_mods(spt_root, server_root=None):
+def scan_installed_mods(spt_root, server_root=None, headless_root=None):
     """Scan for installed mods. Each record has source/path/guid/name/version
     (and author/spt_version, when the reader found them); entries where
     extraction failed are skipped rather than included with missing data.
 
     spt_root is the game folder (client plugins). server_root, when it's a
     different folder, is where the server mods are read from instead -- the
-    game folder's own server copy is then ignored as stale -- and any BepInEx
-    plugins there are a headless client's, reported with source "headless".
+    game folder's own server copy is then ignored as stale. The headless
+    client's plugins (source "headless") come from resolve_headless_root.
     """
     results = []
-    separate = bool(server_root) and not _same_folder(spt_root, server_root)
-    server_root = server_root if separate else spt_root
+    if not server_root or _same_folder(spt_root, server_root):
+        server_root = spt_root
+    headless_root = resolve_headless_root(spt_root, server_root, headless_root)
 
     client_dlls = find_bepinex_plugins(spt_root)
     server_dlls = find_server_mods(server_root)
-    headless_dlls = find_bepinex_plugins(server_root) if separate else []
-    if separate:
-        # One ModReader run per install: each resolves its dependencies from
-        # its own root (the game's Managed DLLs vs. the server's).
-        game_out = _run_modreader(spt_root, client_dlls, [])
-        server_out = _run_modreader(server_root, headless_dlls, server_dlls)
-        client_meta = game_out.get("client", {})
-        headless_meta = server_out.get("client", {})
-        server_meta = server_out.get("server", {})
-    else:
-        reader_output = _run_modreader(spt_root, client_dlls, server_dlls)
-        client_meta = reader_output.get("client", {})
-        headless_meta = {}
-        server_meta = reader_output.get("server", {})
+    headless_dlls = find_bepinex_plugins(headless_root) if headless_root else []
 
-    for source, dlls, meta_by_path in (("client", client_dlls, client_meta),
-                                       ("headless", headless_dlls, headless_meta)):
+    # One ModReader run per distinct folder: each resolves dependencies from
+    # its own install (the game's Managed DLLs, the server's, the headless').
+    runs = []
+
+    def run_for(root):
+        for run in runs:
+            if _same_folder(run["root"], root):
+                return run
+        runs.append({"root": root, "client": [], "server": []})
+        return runs[-1]
+
+    run_for(spt_root)["client"] += client_dlls
+    run_for(server_root)["server"] += server_dlls
+    if headless_root:
+        run_for(headless_root)["client"] += headless_dlls
+    client_meta, server_meta = {}, {}
+    for run in runs:
+        out = _run_modreader(run["root"], run["client"], run["server"])
+        client_meta.update(out.get("client", {}))
+        server_meta.update(out.get("server", {}))
+
+    for source, dlls in (("client", client_dlls), ("headless", headless_dlls)):
         for dll_path in dlls:
-            meta = meta_by_path.get(str(dll_path))
+            meta = client_meta.get(str(dll_path))
             if meta and not meta.get("error") and meta.get("guid"):
                 results.append({
                     "source": source, "path": str(dll_path), "guid": meta.get("guid"),
